@@ -87,6 +87,21 @@ class TestSignalModel(unittest.TestCase):
         self.assertEqual(spec.offset, 0.0)
         self.assertEqual(spec.labels, {})
 
+    def test_extreme_marks_round_trip_and_legacy_layout(self):
+        """极值标记是行级显示选项：None（跟随全局）/ True / False 都要能往返；
+        老布局没有该字段时按 None 处理。"""
+        spec = sigmodel.SignalSpec(key=KEY, byte_offset=1, name="计数器")
+        self.assertIsNone(spec.extreme_marks)                     # 默认跟随全局
+        self.assertIsNone(sigmodel.SignalSpec.from_dict(spec.to_dict()).extreme_marks)
+
+        spec.extreme_marks = False
+        payload = spec.to_dict()
+        self.assertIs(payload["extreme_marks"], False)
+        self.assertIs(sigmodel.SignalSpec.from_dict(payload).extreme_marks, False)
+
+        legacy = {k: v for k, v in payload.items() if k != "extreme_marks"}
+        self.assertIsNone(sigmodel.SignalSpec.from_dict(legacy).extreme_marks)
+
 
 if __name__ == "__main__":
     unittest.main()

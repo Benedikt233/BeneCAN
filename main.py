@@ -37,7 +37,8 @@ from utils.log_setup import fmt_bytes, fmt_seconds, setup_logging  # noqa: E402
 logger = logging.getLogger(__name__)
 
 TIME_MODES = [("原样时间", MODE_TIME), ("空档压缩", MODE_SESSION), ("全局帧序号", MODE_INDEX)]
-MEASURE_COLUMNS = ["信号", "T1 值", "T2 值", "差值", "最小", "最大", "均值"]
+MEASURE_COLUMNS = ["信号", "T1 值", "T2 值", "差值", "最小", "最大", "均值", "极值"]
+EXTREME_COLUMN = len(MEASURE_COLUMNS) - 1        # 最后一列：勾选 = 该行显示 min/max 虚线
 
 
 def app_dir() -> str:
@@ -164,6 +165,8 @@ class MainWindow(QMainWindow):
         self.measure_table.setHorizontalHeaderLabels(MEASURE_COLUMNS)
         self.measure_table.verticalHeader().setVisible(False)
         self.measure_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.measure_table.itemChanged.connect(self._on_measure_item_changed)
+        self._refreshing_measure = False
         header = self.measure_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for column in range(1, len(MEASURE_COLUMNS)):
@@ -183,37 +186,56 @@ class MainWindow(QMainWindow):
     def _on_cursor_changed(self, x1: float, x2: float) -> None:
         self._refresh_measure_table()
 
+    def _on_measure_item_changed(self, item) -> None:
+        """值表里勾/取消"极值"列 → 切换该行的极值标记（单行覆盖，不影响其他行）。"""
+        if self._refreshing_measure or item.column() != EXTREME_COLUMN:
+            return
+        enabled = item.checkState() == Qt.CheckState.Checked
+        self.graphic.set_row_extremes(item.row(), enabled)
+
     def _refresh_measure_table(self) -> None:
         rows = self.graphic.measurements()
-        if not rows:
-            self.measure_table.setRowCount(0)
-            self.delta_label.setText("图形区还没有行：加入报文后这里会显示每行的最小/最大/均值"
-                                     "（启用双光标还会显示 T1/T2 取值与 ΔT）")
-            return
-        stats_note = "行统计 %d 行：最小 / 最大 / 均值" % len(rows)
-        if not self.graphic.cursors_enabled:
-            self.delta_label.setText("%s    |    未启用双光标（Ctrl+M 或图形区右键）："
-                                     "启用后可测 T1/T2 与 ΔT" % stats_note)
-        else:
-            delta = self.graphic.delta_t()
-            x1, x2 = self.graphic.cursor_positions()
-            if delta is None:
-                self.delta_label.setText("%s    |    双光标未定位（拖动红线 T1 / 蓝线 T2）"
-                                         % stats_note)
+        self._refreshing_measure = True              # 防：填表触发 itemChanged 再次刷新
+        try:
+            if not rows:
+                self.measure_table.setRowCount(0)
+                self.delta_label.setText("图形区还没有行：加入报文后这里会显示每行的最小/最大/均值"
+                                         "（启用双光标还会显示 T1/T2 取值与 ΔT）")
+                return
+            stats_note = "行统计 %d 行：最小 / 最大 / 均值；最后一列可单独关掉某行的极值线" % len(rows)
+            if not self.graphic.cursors_enabled:
+                self.delta_label.setText("%s    |    未启用双光标（Ctrl+M 或图形区右键）："
+                                         "启用后可测 T1/T2 与 ΔT" % stats_note)
             else:
-                self.delta_label.setText(
-                    "ΔT = %.6f s (%.3f ms)    T1 = %.6f    T2 = %.6f    %s"
-                    % (delta, delta * 1000.0, x1, x2, stats_note))
-        self.measure_table.setRowCount(len(rows))
-        for index, item in enumerate(rows):
-            values = [item["name"], item["text1"], item["text2"], item["text_delta"],
-                      item["min_text"], item["max_text"], item["mean_text"]]
-            for column, text in enumerate(values):
-                cell = self.measure_table.item(index, column)
-                if cell is None:
-                    cell = QTableWidgetItem()
-                    self.measure_table.setItem(index, column, cell)
-                cell.setText(str(text))
+                delta = self.graphic.delta_t()
+                x1, x2 = self.graphic.cursor_positions()
+                if delta is None:
+                    self.delta_label.setText("%s    |    双光标未定位（拖动红线 T1 / 蓝线 T2）"
+                                             % stats_note)
+                else:
+                    self.delta_label.setText(
+                        "ΔT = %.6f s (%.3f ms)    T1 = %.6f    T2 = %.6f    %s"
+                        % (delta, delta * 1000.0, x1, x2, stats_note))
+            self.measure_table.setRowCount(len(rows))
+            for index, item in enumerate(rows):
+                values = [item["name"], item["text1"], item["text2"], item["text_delta"],
+                          item["min_text"], item["max_text"], item["mean_text"], ""]
+                for column, text in enumerate(values):
+                    cell = self.measure_table.item(index, column)
+                    if cell is None:
+                        cell = QTableWidgetItem()
+                        self.measure_table.setItem(index, column, cell)
+                    cell.setText(str(text))
+                extreme = self.measure_table.item(index, EXTREME_COLUMN)
+                extreme.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                                 | Qt.ItemFlag.ItemIsUserCheckable)
+                extreme.setCheckState(Qt.CheckState.Checked if item["extreme_on"]
+                                      else Qt.CheckState.Unchecked)
+                extreme.setToolTip(
+                    "勾选 = 本行显示 min/max 虚线%s"
+                    % ("（当前跟随全局开关）" if item["extreme_follow"] else "（已单独设置）"))
+        finally:
+            self._refreshing_measure = False
 
     # ---------------------------------------------------------------- 工具栏/菜单
     def _build_actions(self) -> None:
@@ -245,8 +267,14 @@ class MainWindow(QMainWindow):
         self.extremes_action = QAction("显示极值标记", self)
         self.extremes_action.setCheckable(True)
         self.extremes_action.setChecked(True)
-        self.extremes_action.setToolTip("在每行画 min/max 水平虚线")
+        self.extremes_action.setToolTip("在每行画 min/max 水平虚线（单行可在值表最后一列或右键单独关掉）")
         self.extremes_action.toggled.connect(self.graphic.set_show_extremes)
+
+        self.symbols_action = QAction("显示采样点", self)
+        self.symbols_action.setCheckable(True)
+        self.symbols_action.setChecked(True)
+        self.symbols_action.setToolTip("在真实采样点处画圆点（每行可见点数过多时自动隐藏，放大后出现）")
+        self.symbols_action.toggled.connect(self.graphic.set_show_symbols)
 
         self.readout_action = QAction("鼠标跟随读值", self)
         self.readout_action.setCheckable(True)
@@ -329,6 +357,7 @@ class MainWindow(QMainWindow):
         menu_view.addAction(self.overlay_action)
         menu_view.addAction(self.snap_action)
         menu_view.addAction(self.readout_action)
+        menu_view.addAction(self.symbols_action)
         menu_view.addAction(self.extremes_action)
         menu_view.addAction(self.reset_cursor_action)
         menu_view.addAction(self.measure_dock_action)

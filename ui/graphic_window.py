@@ -42,6 +42,9 @@ CURSOR_HANDLE_H = 9
 CURSOR_SNAP_PX = 26.0            # 按下点离手柄超过该像素数时，手柄先吸附到点击处
 EXTREME_COLOR = "#9aa0a6"        # 极值标记线（淡灰，不抢曲线）
 READOUT_BG = "#ffffffd8"
+SYMBOL = "o"                     # 采样点形状
+SYMBOL_SIZE = 5                  # 采样点直径（px）
+SYMBOL_MAX_POINTS = 3000         # 单行**可见**点数超过它就不画采样点（否则糊成色块且拖慢渲染）
 
 MODE_LABELS = {
     "time": "时间 (s)",
@@ -230,6 +233,8 @@ class GraphicRow:
     readout: object = None               # 右上角"鼠标读值"文本
     extreme_lines: list = field(default_factory=list)   # 极值标记线（最多 2 条）
     stats: dict = None                   # signals/stats.stats_of 的结果
+    marker_on: bool = False              # 当前是否画了采样点
+    visible_points: int = 0              # 当前视窗内可见点数（决定要不要画采样点）
     values: np.ndarray = field(default=None)
     x: np.ndarray = field(default=None)
 
@@ -299,7 +304,9 @@ class GraphicWindow(QWidget):
         self._readout_enabled = True         # 鼠标跟随读值（CANoe 风格）
         self._readout_x = None               # 当前读值位置（None = 未指向绘图区）
         self._snap = True                    # 读值/光标吸附到真实采样点
-        self._show_extremes = True           # 行内极值标记线
+        self._show_extremes = True           # 行内极值标记线（全局默认，可被单行覆盖）
+        self._show_symbols = True            # 采样点标记（放大到一定密度自动出现）
+        self._marker_rows_shown = None       # 上次"画了采样点"的行数（仅用于日志）
 
         self.header = QLabel(self._header_text())
         self.header.setStyleSheet("color:#555; padding:4px 6px;")
@@ -383,15 +390,92 @@ class GraphicWindow(QWidget):
         return self._show_extremes
 
     def set_show_extremes(self, enabled: bool) -> None:
-        """显示/隐藏每行的极值标记线（min/max 水平虚线）。"""
+        """全局显示/隐藏极值标记线（只影响"跟随全局"的行，单行覆盖不受影响）。"""
         enabled = bool(enabled)
         if enabled == self._show_extremes:
             return
         self._show_extremes = enabled
-        logger.debug("极值标记：%s", "显示" if enabled else "隐藏")
+        logger.debug("极值标记（全局）：%s", "显示" if enabled else "隐藏")
         for row in self._rows:
             self._update_extremes(row)
         self.header.setText(self._header_text())
+
+    # ---------------------------------------------- 行级极值开关（覆盖全局）
+    def row_extremes(self, index: int) -> bool:
+        """该行**当前有效**的极值显示状态。"""
+        if not 0 <= index < len(self._rows):
+            return False
+        spec = self._rows[index].spec
+        return self._show_extremes if spec.extreme_marks is None else bool(spec.extreme_marks)
+
+    def set_row_extremes(self, index: int, enabled) -> None:
+        """设置单行极值开关：True/False = 本行强制；None = 清除设置、恢复跟随全局。"""
+        if not 0 <= index < len(self._rows):
+            return
+        row = self._rows[index]
+        row.spec.extreme_marks = None if enabled is None else bool(enabled)
+        logger.debug("行级极值标记：%s → %s", row.name,
+                     "跟随全局" if enabled is None else ("显示" if enabled else "隐藏"))
+        self._update_extremes(row)
+        self.header.setText(self._header_text())
+        self.rowsChanged.emit()
+
+    @property
+    def show_symbols(self) -> bool:
+        """采样点标记总开关（默认开）。"""
+        return self._show_symbols
+
+    def set_show_symbols(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._show_symbols:
+            return
+        self._show_symbols = enabled
+        logger.debug("采样点标记：%s", "显示" if enabled else "隐藏")
+        self._update_point_markers(force=True)
+
+    def _apply_markers(self, row, show: bool) -> None:
+        """给某行开/关采样点标记（画在**真实采样点**上，不开降采样以免标记错位）。"""
+        if row.curve is None:
+            return
+        if show:
+            row.curve.setSymbol(SYMBOL)
+            row.curve.setSymbolSize(SYMBOL_SIZE)
+            row.curve.setSymbolBrush(pg.mkBrush(row.color))
+            row.curve.setSymbolPen(None)
+            row.curve.setDownsampling(auto=False, ds=1)
+        else:
+            row.curve.setSymbol(None)
+            row.curve.setDownsampling(auto=True, method="peak")
+        row.marker_on = show
+
+    def _update_point_markers(self, force: bool = False) -> None:
+        """按"视窗内可见点数"决定是否画采样点：放大才出现，缩小时不糊成一片。
+
+        逐行独立判断：稀疏行（如 1 Hz 的报文）在很宽的视图里也能看到点。
+        """
+        if not self._rows:
+            return
+        x_range = self.x_range()
+        if x_range is None:
+            return
+        lo, hi = x_range
+        for row in self._rows:
+            if row.curve is None:
+                continue
+            if row.x is None or len(row.x) == 0:
+                row.visible_points = 0
+            else:
+                first = int(np.searchsorted(row.x, lo, side="left"))
+                last = int(np.searchsorted(row.x, hi, side="right"))
+                row.visible_points = max(0, last - first)
+            show = self._show_symbols and 0 < row.visible_points <= SYMBOL_MAX_POINTS
+            if force or row.marker_on != show:
+                self._apply_markers(row, show)
+        shown = sum(1 for row in self._rows if row.marker_on)
+        if shown != self._marker_rows_shown:
+            self._marker_rows_shown = shown
+            logger.debug("采样点：%d/%d 行显示（阈值 %d 点/行）",
+                         shown, len(self._rows), SYMBOL_MAX_POINTS)
 
     @property
     def readout_enabled(self) -> bool:
@@ -484,13 +568,19 @@ class GraphicWindow(QWidget):
         self.set_readout_x(None)
         super().leaveEvent(event)
 
+    def _row_extremes_enabled(self, row) -> bool:
+        """该行是否要画极值线：单行设置优先，否则跟随全局开关。"""
+        override = row.spec.extreme_marks
+        return self._show_extremes if override is None else bool(override)
+
     def _update_extremes(self, row) -> None:
         """按当前开关与统计结果重建该行的极值标记线。"""
         for line in row.extreme_lines:
             row.plot.removeItem(line)
         row.extreme_lines = []
         stats = row.stats or {}
-        if not self._show_extremes or row.plot is None or stats.get("min") is None:
+        if (not self._row_extremes_enabled(row) or row.plot is None
+                or stats.get("min") is None):
             return
         if stats["min"] == stats["max"]:             # 常量行不需要两条重合的线
             return
@@ -658,13 +748,13 @@ class GraphicWindow(QWidget):
         return abs(x2 - x1)
 
     def measurements(self) -> list:
-        """每行的 T1/T2 取值与差值，外加**行统计**（最小/最大/均值）。
+        """每行的 T1/T2 取值与差值，外加**行统计**（最小/最大/均值）与极值开关状态。
 
         未启用双光标时 T1/T2 为 "—"，但行统计照常给出 —— 值表因此始终有内容。
         """
         x1, x2 = self._cursor_values
         out = []
-        for row in self._rows:
+        for index, row in enumerate(self._rows):
             v1, t1 = row.value_text_at(x1)
             v2, t2 = row.value_text_at(x2)
             delta_text = "—"
@@ -674,7 +764,10 @@ class GraphicWindow(QWidget):
             out.append({"name": row.name, "v1": v1, "v2": v2,
                         "text1": t1, "text2": t2, "text_delta": delta_text,
                         "min_text": row.min_text, "max_text": row.max_text,
-                        "mean_text": row.mean_text, "stats": row.stats})
+                        "mean_text": row.mean_text, "stats": row.stats,
+                        "row_index": index,
+                        "extreme_on": self._row_extremes_enabled(row),
+                        "extreme_follow": row.spec.extreme_marks is None})
         return out
 
     def _emit_cursors(self) -> None:
@@ -805,6 +898,7 @@ class GraphicWindow(QWidget):
         for row in self._rows:               # glw 已清空，旧图元引用全部作废
             row.plot, row.curve, row.caption = None, None, None
             row.readout, row.extreme_lines = None, []
+            row.marker_on = False
         if self._overlay:
             self._rebuild_overlay()
         else:
@@ -819,6 +913,7 @@ class GraphicWindow(QWidget):
         self._connect_range_changes()
         self._place_overlays()
         self._update_readouts()
+        self._update_point_markers()
         self._sync_cursor_bar()
         self.header.setText(self._header_text())
         self.rowsChanged.emit()
@@ -954,6 +1049,7 @@ class GraphicWindow(QWidget):
 
     def _on_view_range_changed(self, *_args) -> None:
         self._place_overlays()
+        self._update_point_markers()
         self._sync_cursor_bar()
 
     def _set_x_range(self, x0: float, x1: float) -> None:
@@ -997,6 +1093,15 @@ class GraphicWindow(QWidget):
             menu.addAction("上移该行", lambda: self.move_row(index, -1))
             menu.addAction("下移该行", lambda: self.move_row(index, 1))
             menu.addAction("该行置顶", lambda: self.move_row(index, -index))
+            menu.addSeparator()
+            row_extreme = menu.addAction("本行显示极值标记（min/max）")
+            row_extreme.setCheckable(True)
+            row_extreme.setChecked(self.row_extremes(index))
+            row_extreme.toggled.connect(
+                lambda checked, i=index: self.set_row_extremes(i, checked))
+            if self._rows[index].spec.extreme_marks is not None:
+                menu.addAction("本行恢复跟随全局开关",
+                               lambda i=index: self.set_row_extremes(i, None))
         menu.addSeparator()
         snap_action = menu.addAction("光标/读值吸附到采样点")
         snap_action.setCheckable(True)
@@ -1006,7 +1111,11 @@ class GraphicWindow(QWidget):
         readout_action.setCheckable(True)
         readout_action.setChecked(self._readout_enabled)
         readout_action.toggled.connect(self.set_readout_enabled)
-        extremes_action = menu.addAction("显示极值标记（min/max）")
+        symbols_action = menu.addAction("显示采样点（放大后自动出现）")
+        symbols_action.setCheckable(True)
+        symbols_action.setChecked(self._show_symbols)
+        symbols_action.toggled.connect(self.set_show_symbols)
+        extremes_action = menu.addAction("显示极值标记（全部行）")
         extremes_action.setCheckable(True)
         extremes_action.setChecked(self._show_extremes)
         extremes_action.toggled.connect(self.set_show_extremes)

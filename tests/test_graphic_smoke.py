@@ -584,6 +584,109 @@ class TestGraphicSmoke(unittest.TestCase):
         self.window.extremes_action.setChecked(True)
         self.assertEqual(len(row.extreme_lines), 2)
 
+    def test_row_level_extreme_override(self):
+        """单行可以单独关掉极值线，不影响别的行；也能恢复跟随全局。"""
+        from signals.model import SignalSpec
+
+        # A = 0x17A 的 byte1（帧序号，变化）；B = 0x100 的 byte0（0/1/2 变化）
+        self.graphic.add_specs([
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="A"),
+            SignalSpec(key=("canfd", 4, 0x100), byte_offset=0, name="B")])
+        first, second = self.graphic.rows()
+        self.assertEqual(len(first.extreme_lines), 2)
+        self.assertEqual(len(second.extreme_lines), 2)
+
+        self.graphic.set_row_extremes(0, False)                  # 只关第一行
+        self.assertEqual(first.extreme_lines, [])
+        self.assertEqual(len(second.extreme_lines), 2)
+        self.assertFalse(self.graphic.row_extremes(0))
+        self.assertTrue(self.graphic.row_extremes(1))
+        self.assertIs(first.spec.extreme_marks, False)
+
+        self.window.extremes_action.setChecked(False)            # 全局关：行级 False 的行不受影响
+        self.graphic.set_row_extremes(0, True)                   # 第一行强制显示
+        self.assertEqual(len(first.extreme_lines), 2)
+        self.assertEqual(second.extreme_lines, [])               # 第二行跟随全局 → 关
+        self.window.extremes_action.setChecked(True)
+
+        self.graphic.set_row_extremes(0, None)                   # 恢复跟随全局
+        self.assertIsNone(first.spec.extreme_marks)
+        self.assertEqual(len(first.extreme_lines), 2)
+
+    def test_value_table_extreme_checkbox_controls_row(self):
+        from PySide6.QtCore import Qt as QtCore
+
+        from signals.model import SignalSpec
+
+        self.graphic.add_specs([
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="A"),
+            SignalSpec(key=("canfd", 4, 0x100), byte_offset=0, name="B")])
+        self.window._refresh_measure_table()
+        self.assertEqual(self.window.measure_table.rowCount(), 2)
+        first, second = self.graphic.rows()
+        self.assertEqual(len(first.extreme_lines), 2)
+
+        # 取消第一行的勾选 → 只关这一行
+        cell = self.window.measure_table.item(0, self.app_main.EXTREME_COLUMN)
+        cell.setCheckState(QtCore.CheckState.Unchecked)
+        self.assertEqual(first.extreme_lines, [])
+        self.assertEqual(len(second.extreme_lines), 2)
+        self.assertIs(first.spec.extreme_marks, False)
+
+        # 再勾回来 → 该行恢复
+        cell.setCheckState(QtCore.CheckState.Checked)
+        self.assertEqual(len(first.extreme_lines), 2)
+        self.assertIs(first.spec.extreme_marks, True)
+
+    def test_extreme_override_survives_layout_round_trip(self):
+        from signals.model import SignalSpec
+        from utils import export as exporter
+
+        spec = SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="A")
+        self.graphic.add_specs(spec)
+        self.graphic.set_row_extremes(0, False)
+
+        target = os.path.join(self.tmpdir, "layout_extreme.json")
+        exporter.save_layout(target, self.graphic.specs(), self.graphic.time_mode)
+        layout = exporter.load_layout(target)
+        self.assertIs(layout["rows"][0].extreme_marks, False)
+
+        self.graphic.clear()
+        self.graphic.set_specs(layout["rows"], layout["time_mode"])
+        self.assertEqual(self.graphic.rows()[0].spec.extreme_marks, False)
+        self.assertEqual(self.graphic.rows()[0].extreme_lines, [])
+
+    # ------------------------------------------------- 采样点标记（默认显示，按密度自动出现）
+    def test_point_markers_shown_by_default(self):
+        row = self._add_counter_row()
+        self.assertTrue(self.graphic.show_symbols)
+        self.assertTrue(row.marker_on)                           # 200 点 ≪ 阈值 → 显示
+        self.assertEqual(row.curve.opts["symbol"], "o")
+        self.assertEqual(row.visible_points, len(row.x))
+
+    def test_point_markers_hidden_when_too_dense(self):
+        from unittest import mock
+
+        from ui import graphic_window
+
+        row = self._add_counter_row()
+        self.assertTrue(row.marker_on)
+        with mock.patch.object(graphic_window, "SYMBOL_MAX_POINTS", 100):
+            self.graphic._update_point_markers(force=True)       # 200 点 > 100 → 自动隐藏
+            self.assertFalse(row.marker_on)
+            self.assertIsNone(row.curve.opts["symbol"])
+        self.graphic._update_point_markers(force=True)           # 还原阈值 → 又显示
+        self.assertTrue(row.marker_on)
+
+    def test_point_markers_follow_global_switch(self):
+        row = self._add_counter_row()
+        self.window.symbols_action.setChecked(False)
+        self.assertFalse(row.marker_on)
+        self.assertIsNone(row.curve.opts["symbol"])
+        self.window.symbols_action.setChecked(True)
+        self.assertTrue(row.marker_on)
+        self.assertEqual(row.curve.opts["symbol"], "o")
+
     def test_constant_row_has_no_extreme_markers(self):
         from signals.model import SignalSpec
 

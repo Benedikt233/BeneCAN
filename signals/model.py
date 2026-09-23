@@ -50,6 +50,7 @@ class SignalSpec:
     name: str = ""
     unit: str = ""
     step: bool = False             # True = 阶梯绘制（数字量/枚举，CANoe 风格）
+    extreme_marks: bool | None = None   # 极值标记：None = 跟随全局开关，True/False = 本行强制
 
     @property
     def kind(self) -> str:
@@ -113,12 +114,14 @@ class SignalSpec:
             "name": self.name,
             "unit": self.unit,
             "step": self.step,
+            "extreme_marks": self.extreme_marks,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "SignalSpec":
         key = data["key"]
         labels = {int(k): v for k, v in (data.get("labels") or {}).items()}
+        extreme = data.get("extreme_marks")            # 老布局没有该字段 → None（跟随全局）
         return cls(
             key=(key[0], int(key[1]), int(key[2])),
             byte_offset=int(data.get("byte_offset", 0)),
@@ -135,6 +138,7 @@ class SignalSpec:
             name=data.get("name", ""),
             unit=data.get("unit", ""),
             step=bool(data.get("step", False)),
+            extreme_marks=None if extreme is None else bool(extreme),
         )
 
 
