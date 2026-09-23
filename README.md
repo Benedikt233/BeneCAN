@@ -54,8 +54,13 @@ python -m PyInstaller benecan.spec --noconfirm
 | 展开报文 | 看逐字节画像（常量/枚举/模拟 + 取值数/范围）；有 DBC 时改为列 DBC 信号 |
 | 图形区 | 滚轮缩放、拖动平移；任一行缩放其余行同步；右键可删行/上移/下移/置顶/清空 |
 | 行内说明 | 每个坐标系左上角横排显示信号名（旋转的轴标题在矮行里会被截断，看不到）；**Y 轴标题显示 DBC 里的单位**（如 `[km/h]`） |
+| **鼠标读值** | 鼠标在图形区移动，每行**右上角**实时显示该时刻的值（V0.2dev/Thursday 新增）；表头显示 `鼠标 t = …` |
+| **极值标记** | 每行画 min/max 水平虚线（常量行不画），可关；值表同时给出最小/最大/均值 |
 | 光标手柄条 | 图形区上方那条灰带：**整条都能点拖**，拖最近的光标；两光标之间显示 ΔT |
-| 底部值表 | 每行在 T1/T2 处的取值与差值 |
+| 底部值表 | 每行的 T1/T2 取值、差值与**行统计**（最小/最大/均值）；未启用双光标时也有统计列 |
+
+> **吸附采样点**（默认开）：鼠标读值与双光标都吸附到**真实帧时刻**，
+> 避免"保持前一值"语义下"看起来 40、其实 39"的读数错觉。工具栏「吸附采样点」/ 右键 / `Ctrl+Shift+L` 切换。
 
 ### 两种坐标系布局
 
@@ -71,6 +76,7 @@ python -m PyInstaller benecan.spec --noconfirm
 | `Ctrl+O` | 打开 ASC |
 | `Ctrl+M` | 双光标测量开关 |
 | `Ctrl+G` | 单坐标轴叠加开关 |
+| `Ctrl+Shift+L` | 吸附采样点开关（读值与双光标） |
 | `Ctrl+Shift+C` | 导出 CSV（分号：双光标已定位时只导出光标区间） |
 | `Ctrl+Shift+P` | 导出 PNG（含标题、手柄条、曲线） |
 
@@ -200,16 +206,16 @@ BeneCAN.exe "<转换输出目录>"
 ## 七、开发与测试
 
 ```bash
-python -m unittest discover -s tests      # 145 例，含离屏 GUI 冒烟测试与日志测试
+python -m unittest discover -s tests      # 173 例，含离屏 GUI 冒烟测试与日志测试
 python tools\asc_inspect.py  <asc|目录>    # ASC 语法体检 + 时间轴归因
 python tools\asc_index.py    <asc|目录>    # 只建索引并出体积/耗时报告
 python tools\asc_crosscheck.py <asc>      # 与 python-can 逐帧交叉验证
 python tools\asc_query.py    <asc|索引> catalog|stats|profile|signals
 ```
 
-- 版本管理：本地 git 仓库（`main` 分支），当前版本 `V0.1`（tag `V0.1`）
-- 测试用例与验收清单见 [测试计划.md](./测试计划.md)
-- 目录结构与各模块职责、里程碑与实测记录见 [开发计划.md](./开发计划.md)
+- 版本管理：本地 git 仓库（`main` = V0.1；开发分支 `V0.2dev`，代号 Thursday）
+- 测试用例与人工验收清单（每条标了自动/人工）见 [测试计划.md](./测试计划.md)
+- 目录结构与各模块职责、里程碑、**对标 CANoe 的差距与路线（P0/P1/P2）** 见 [开发计划.md](./开发计划.md) §十八
 
 > 已知环境坑：`cantools`（bitstruct C 扩展）若在 **Qt 首次初始化之前**加载，进程会以
 > `0xC0000005` 崩溃；因此 `main.py` 把 Qt 导入放在最前，测试包也做了同样的顺序保证。

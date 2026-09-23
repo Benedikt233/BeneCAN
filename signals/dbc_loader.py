@@ -119,6 +119,16 @@ def _cjk_count(text: str, limit: int = 400_000) -> int:
                if 0x4E00 <= ord(char) <= 0x9FFF or 0x3040 <= ord(char) <= 0x30FF)
 
 
+def _choice_text(value) -> str:
+    """把 VAL_ 枚举文本统一成纯字符串。
+
+    cantools 39+ 把枚举值包成 `NamedSignalValue`（带 .name/.value/.comments），
+    它不是 str 子类：直接传给 Qt（如 setPlainText）会抛类型错误。
+    这里一次性归一化，下游（树/值表/读值/CSV）就都是纯字符串了。
+    """
+    return str(getattr(value, "name", value))
+
+
 def _require_cantools():
     try:
         import cantools
@@ -250,7 +260,8 @@ class DbcFile:
                     scale=float(sig.scale),
                     offset=float(sig.offset),
                     unit=sig.unit or "",
-                    choices={int(k): v for k, v in (sig.choices or {}).items()},
+                    choices={int(k): _choice_text(v)
+                             for k, v in (sig.choices or {}).items()},
                     minimum=sig.minimum,
                     maximum=sig.maximum,
                     comment=sig.comment or "",

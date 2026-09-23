@@ -27,6 +27,7 @@ from PySide6.QtWidgets import QLabel, QMenu, QVBoxLayout, QWidget
 
 from core.query import MODE_INDEX, MODE_SESSION
 from signals import model as sigmodel
+from signals.stats import format_number, nearest_sample, stats_of
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ CURSOR_BAR_HEIGHT = 22
 CURSOR_HANDLE_W = 9
 CURSOR_HANDLE_H = 9
 CURSOR_SNAP_PX = 26.0            # 按下点离手柄超过该像素数时，手柄先吸附到点击处
+EXTREME_COLOR = "#9aa0a6"        # 极值标记线（淡灰，不抢曲线）
+READOUT_BG = "#ffffffd8"
 
 MODE_LABELS = {
     "time": "时间 (s)",
@@ -224,6 +227,9 @@ class GraphicRow:
     plot: object = None
     curve: object = None
     caption: object = None
+    readout: object = None               # 右上角"鼠标读值"文本
+    extreme_lines: list = field(default_factory=list)   # 极值标记线（最多 2 条）
+    stats: dict = None                   # signals/stats.stats_of 的结果
     values: np.ndarray = field(default=None)
     x: np.ndarray = field(default=None)
 
@@ -240,6 +246,18 @@ class GraphicRow:
     def unit_text(self) -> str:
         """Y 轴标题：DBC 里规定的单位（没有单位时为空）。"""
         return "[%s]" % self.spec.unit if self.spec.unit else ""
+
+    @property
+    def min_text(self) -> str:
+        return format_number((self.stats or {}).get("min"))
+
+    @property
+    def max_text(self) -> str:
+        return format_number((self.stats or {}).get("max"))
+
+    @property
+    def mean_text(self) -> str:
+        return format_number((self.stats or {}).get("mean"))
 
     def value_text_at(self, x) -> tuple:
         """取"该时刻的值"（保持前一值语义）；返回 (数值或 None, 显示文本)。"""
@@ -278,6 +296,10 @@ class GraphicWindow(QWidget):
         self._cursor_lines = []              # [(row_index, cursor_index, InfiniteLine)]
         self._syncing = False
         self._range_sources = []             # 各坐标系 ViewBox（监听缩放/平移）
+        self._readout_enabled = True         # 鼠标跟随读值（CANoe 风格）
+        self._readout_x = None               # 当前读值位置（None = 未指向绘图区）
+        self._snap = True                    # 读值/光标吸附到真实采样点
+        self._show_extremes = True           # 行内极值标记线
 
         self.header = QLabel(self._header_text())
         self.header.setStyleSheet("color:#555; padding:4px 6px;")
@@ -289,6 +311,10 @@ class GraphicWindow(QWidget):
         self.glw.ci.setContentsMargins(0, 0, 0, 0)
         self.glw.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.glw.customContextMenuRequested.connect(self._on_context_menu)
+        # 鼠标跟随读值：scene 是持久的（glw.clear() 只清图元），代理只连一次
+        self._mouse_proxy = pg.SignalProxy(self.glw.scene().sigMouseMoved,
+                                           rateLimit=60,
+                                           slot=self._on_scene_mouse_moved)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -336,6 +362,153 @@ class GraphicWindow(QWidget):
         self._overlay = enabled
         logger.debug("坐标轴布局切换为：%s", "单坐标轴叠加" if enabled else "多轴堆叠")
         self._rebuild()
+
+    # ------------------------------------------------- 鼠标读值 / 吸附 / 极值标记
+    @property
+    def cursor_snap(self) -> bool:
+        """光标与读值是否吸附到真实采样点。"""
+        return self._snap
+
+    def set_cursor_snap(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._snap:
+            return
+        self._snap = enabled
+        logger.debug("采样点吸附：%s", "开启" if enabled else "关闭")
+        self.set_readout_x(self._readout_x)          # 立刻按新策略重算读值
+        self._sync_cursor_lines()
+
+    @property
+    def show_extremes(self) -> bool:
+        return self._show_extremes
+
+    def set_show_extremes(self, enabled: bool) -> None:
+        """显示/隐藏每行的极值标记线（min/max 水平虚线）。"""
+        enabled = bool(enabled)
+        if enabled == self._show_extremes:
+            return
+        self._show_extremes = enabled
+        logger.debug("极值标记：%s", "显示" if enabled else "隐藏")
+        for row in self._rows:
+            self._update_extremes(row)
+        self.header.setText(self._header_text())
+
+    @property
+    def readout_enabled(self) -> bool:
+        return self._readout_enabled
+
+    def set_readout_enabled(self, enabled: bool) -> None:
+        self._readout_enabled = bool(enabled)
+        if not self._readout_enabled:
+            self.set_readout_x(None)
+
+    @property
+    def readout_x(self):
+        """当前鼠标读值位置（未指向绘图区时为 None）。"""
+        return self._readout_x
+
+    def snap_x(self, x, row=None) -> float:
+        """把 x 吸附到采样点（吸附关闭或无数据时原样返回）。"""
+        if not self._snap or x is None:
+            return x
+        base = row if (row is not None and row.x is not None and len(row.x)) else (
+            self._rows[0] if self._rows else None)
+        if base is None or base.x is None or len(base.x) == 0:
+            return x
+        _index, sample = nearest_sample(base.x, x)
+        return float(x) if sample is None else sample
+
+    def set_readout_x(self, x) -> None:
+        """设定鼠标读值位置（None = 清除）。吸附策略在这里生效。"""
+        if (not self._readout_enabled or x is None
+                or (isinstance(x, float) and np.isnan(x))):
+            self._readout_x = None
+        else:
+            self._readout_x = float(self.snap_x(x))
+        self._update_readouts()
+        self.header.setText(self._header_text())
+
+    def readouts(self) -> list:
+        """每行当前的读值文本（供值表/测试使用）。"""
+        return [self._row_readout_text(row) for row in self._rows]
+
+    def _row_readout_text(self, row) -> str:
+        if self._readout_x is None or row.x is None or len(row.x) == 0:
+            return ""
+        _value, text = row.value_text_at(self._readout_x)
+        if text == "—":
+            return "—"
+        return "%s %s" % (text, row.spec.unit) if row.spec.unit else text
+
+    def _update_readouts(self) -> None:
+        """刷新读值文本：堆叠模式每行一处；叠加模式合并成多行放在共用坐标系上。"""
+        if self._overlay:
+            lines = []
+            for row in self._rows:
+                text = self._row_readout_text(row)
+                if text:
+                    lines.append("%s = %s" % (row.label_text, text))
+            merged = "\n".join(lines)
+            for row in self._rows:
+                if row.readout is not None:          # 叠加模式只有一个共用读值
+                    row.readout.setText(merged)
+            return
+        for row in self._rows:
+            if row.readout is not None:
+                row.readout.setText(self._row_readout_text(row))
+
+    def _readout_base_row(self, scene_pos):
+        """吸附基准行：鼠标所在的那一行（不在任何行内时用第一行）。"""
+        for row in self._rows:
+            if row.plot is None:
+                continue
+            if row.plot.getViewBox().sceneBoundingRect().contains(scene_pos):
+                return row
+        return self._rows[0] if self._rows else None
+
+    def _on_scene_mouse_moved(self, scene_pos) -> None:
+        """鼠标在图形区移动 → 刷新每行右上角的读值（CANoe 的鼠标跟随读值）。"""
+        if not self._readout_enabled or not self._rows:
+            return
+        plot = next((row.plot for row in self._rows if row.plot is not None), None)
+        if plot is None:
+            return
+        viewbox = plot.getViewBox()
+        if not viewbox.sceneBoundingRect().contains(scene_pos):
+            self.set_readout_x(None)                 # 移出绘图区 → 收掉读值
+            return
+        x = viewbox.mapSceneToView(scene_pos).x()
+        self.set_readout_x(self.snap_x(x, self._readout_base_row(scene_pos)))
+
+    def leaveEvent(self, event) -> None:
+        self.set_readout_x(None)
+        super().leaveEvent(event)
+
+    def _update_extremes(self, row) -> None:
+        """按当前开关与统计结果重建该行的极值标记线。"""
+        for line in row.extreme_lines:
+            row.plot.removeItem(line)
+        row.extreme_lines = []
+        stats = row.stats or {}
+        if not self._show_extremes or row.plot is None or stats.get("min") is None:
+            return
+        if stats["min"] == stats["max"]:             # 常量行不需要两条重合的线
+            return
+        for value, name in ((stats["max"], "max"), (stats["min"], "min")):
+            line = pg.InfiniteLine(
+                pos=float(value), angle=0, movable=False,
+                pen=pg.mkPen(EXTREME_COLOR, width=1, style=Qt.PenStyle.DashLine),
+                label="%s %s" % (name, format_number(value)),
+                labelOpts={"position": 0.02, "color": "#666666",
+                           "fill": READOUT_BG, "movable": False})
+            line.setZValue(20)
+            row.plot.addItem(line, ignoreBounds=True)
+            row.extreme_lines.append(line)
+
+    def _refresh_row_stats(self, row) -> None:
+        """重算一行统计（加行/换数据源后调用），并同步极值标记。"""
+        row.stats = stats_of(row.values)
+        self._update_extremes(row)
 
     # ---------------------------------------------------------------- 增删行
     def add_message(self, info, max_rows: int = 6) -> int:
@@ -485,9 +658,10 @@ class GraphicWindow(QWidget):
         return abs(x2 - x1)
 
     def measurements(self) -> list:
-        """每行在两条光标处的值及差值（保持前一值语义）。"""
-        if not self._cursors_enabled:
-            return []
+        """每行的 T1/T2 取值与差值，外加**行统计**（最小/最大/均值）。
+
+        未启用双光标时 T1/T2 为 "—"，但行统计照常给出 —— 值表因此始终有内容。
+        """
         x1, x2 = self._cursor_values
         out = []
         for row in self._rows:
@@ -498,7 +672,9 @@ class GraphicWindow(QWidget):
                 diff = v2 - v1
                 delta_text = "%d" % int(diff) if float(diff).is_integer() else "%.4f" % diff
             out.append({"name": row.name, "v1": v1, "v2": v2,
-                        "text1": t1, "text2": t2, "text_delta": delta_text})
+                        "text1": t1, "text2": t2, "text_delta": delta_text,
+                        "min_text": row.min_text, "max_text": row.max_text,
+                        "mean_text": row.mean_text, "stats": row.stats})
         return out
 
     def _emit_cursors(self) -> None:
@@ -522,11 +698,15 @@ class GraphicWindow(QWidget):
 
     # -------------------------------------------------- 手柄条联动
     def _on_bar_dragged(self, cursor_index: int, x_value: float) -> None:
-        """手柄条上按下/拖动：直接设定该光标位置（自动同步光标线与值表）。"""
+        """手柄条上按下/拖动：直接设定该光标位置（自动同步光标线与值表）。
+
+        开启吸附时会把位置对齐到采样点，避免"看起来 40、其实 39"的读数错觉。
+        """
         if not self._cursors_enabled:
             return
         x_lo, x_hi = self._bar_range()
-        self._cursor_values[cursor_index] = float(min(max(x_value, x_lo), x_hi))
+        clamped = float(min(max(x_value, x_lo), x_hi))
+        self._cursor_values[cursor_index] = float(self.snap_x(clamped))
         self._sync_cursor_lines()
         self._emit_cursors()
 
@@ -624,23 +804,29 @@ class GraphicWindow(QWidget):
         self._cursor_lines = []
         for row in self._rows:               # glw 已清空，旧图元引用全部作废
             row.plot, row.curve, row.caption = None, None, None
+            row.readout, row.extreme_lines = None, []
         if self._overlay:
             self._rebuild_overlay()
         else:
             self._rebuild_stacked()
 
+        for row in self._rows:               # 统计与极值标记依赖 plot，故放在重建之后
+            if row.plot is not None:
+                self._refresh_row_stats(row)
+
         if self._rows and self._rows[0].x is not None and len(self._rows[0].x):
             self._set_x_range(float(self._rows[0].x[0]), float(self._rows[0].x[-1]))
         self._connect_range_changes()
-        self._place_captions()
+        self._place_overlays()
+        self._update_readouts()
         self._sync_cursor_bar()
         self.header.setText(self._header_text())
         self.rowsChanged.emit()
         points = sum(len(row.values) for row in self._rows if row.values is not None)
-        logger.debug("重建图形：%d 行 / %d 点 | %s | 时间轴 %s | 双光标 %s | 耗时 %.0f ms",
+        logger.debug("重建图形：%d 行 / %d 点 | %s | 时间轴 %s | 双光标 %s | 极值标记 %s | 耗时 %.0f ms",
                      len(self._rows), points,
                      "单坐标轴叠加" if self._overlay else "多轴堆叠",
-                     self._time_mode, self._cursors_enabled,
+                     self._time_mode, self._cursors_enabled, self._show_extremes,
                      (time.time() - started) * 1000.0)
 
     def _prepare_row(self, row) -> bool:
@@ -678,6 +864,7 @@ class GraphicWindow(QWidget):
             self._plot_curve(plot, row)
             row.plot = plot
             row.caption = self._add_caption(plot, row)
+            row.readout = self._add_readout(plot, row)
             self.glw.ci.layout.setRowStretchFactor(index, 1)
             if self._cursors_enabled:
                 self._build_cursor_lines(index, plot)
@@ -701,11 +888,15 @@ class GraphicWindow(QWidget):
         plot = self.glw.addPlot(row=0, col=0)
         self._style_plot(plot)
         plot.addLegend(offset=(8, 8))
+        first = True
         for row in self._rows:
             if not self._prepare_row(row):
                 continue
             row.plot = plot
             self._plot_curve(plot, row)
+            if first:                          # 叠加模式所有行共用左上角一处读值
+                row.readout = self._add_readout(plot, row)
+                first = False
         plot.setLabel("bottom", MODE_LABELS.get(self._time_mode, ""))
         if self._cursors_enabled:
             self._build_cursor_lines(0, plot)
@@ -723,13 +914,24 @@ class GraphicWindow(QWidget):
         plot.addItem(item, ignoreBounds=True)
         return item
 
-    def _place_captions(self) -> None:
-        """把行内说明钉在各自绘图区的左上角（缩放/平移后仍随视图走）。"""
+    def _add_readout(self, plot, row):
+        """绘图区右上角的"鼠标读值"（跟随鼠标，anchor=(1, 0) 表示钉住文字右上角）。"""
+        item = pg.TextItem("", color=row.color, anchor=(1, 0),
+                           fill=pg.mkBrush(READOUT_BG))
+        item.setZValue(45)
+        plot.addItem(item, ignoreBounds=True)
+        return item
+
+    def _place_overlays(self) -> None:
+        """把行内说明/读值钉在各自绘图区的角上（缩放/平移后仍随视图走）。"""
         for row in self._rows:
-            if row.caption is None or row.plot is None:
+            if row.plot is None:
                 continue
             (x_lo, x_hi), (_y_lo, y_hi) = row.plot.getViewBox().viewRange()
-            row.caption.setPos(x_lo + (x_hi - x_lo) * 0.004, y_hi)
+            if row.caption is not None:
+                row.caption.setPos(x_lo + (x_hi - x_lo) * 0.004, y_hi)
+            if row.readout is not None:
+                row.readout.setPos(x_hi - (x_hi - x_lo) * 0.004, y_hi)
 
     def _connect_range_changes(self) -> None:
         """范围变化（缩放/平移/自动缩放）时同步手柄条与行内说明。
@@ -751,7 +953,7 @@ class GraphicWindow(QWidget):
             self._range_sources.append(viewbox)
 
     def _on_view_range_changed(self, *_args) -> None:
-        self._place_captions()
+        self._place_overlays()
         self._sync_cursor_bar()
 
     def _set_x_range(self, x0: float, x1: float) -> None:
@@ -769,6 +971,9 @@ class GraphicWindow(QWidget):
             len(self._rows), _format_count(total_points),
             "单坐标轴叠加" if self._overlay else "多轴堆叠",
             MODE_LABELS.get(self._time_mode, self._time_mode))
+        if self._readout_x is not None:
+            text += "    | 鼠标 t = %.6f（%s）" % (
+                self._readout_x, "已吸附采样点" if self._snap else "自由位置")
         if self._cursors_enabled:
             delta = self.delta_t()
             if delta is None:
@@ -792,6 +997,19 @@ class GraphicWindow(QWidget):
             menu.addAction("上移该行", lambda: self.move_row(index, -1))
             menu.addAction("下移该行", lambda: self.move_row(index, 1))
             menu.addAction("该行置顶", lambda: self.move_row(index, -index))
+        menu.addSeparator()
+        snap_action = menu.addAction("光标/读值吸附到采样点")
+        snap_action.setCheckable(True)
+        snap_action.setChecked(self._snap)
+        snap_action.toggled.connect(self.set_cursor_snap)
+        readout_action = menu.addAction("鼠标跟随读值")
+        readout_action.setCheckable(True)
+        readout_action.setChecked(self._readout_enabled)
+        readout_action.toggled.connect(self.set_readout_enabled)
+        extremes_action = menu.addAction("显示极值标记（min/max）")
+        extremes_action.setCheckable(True)
+        extremes_action.setChecked(self._show_extremes)
+        extremes_action.toggled.connect(self.set_show_extremes)
         menu.addSeparator()
         overlay_action = menu.addAction("单坐标轴叠加（全部信号共用一个 Y 轴）")
         overlay_action.setCheckable(True)

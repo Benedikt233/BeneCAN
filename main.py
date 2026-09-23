@@ -37,7 +37,7 @@ from utils.log_setup import fmt_bytes, fmt_seconds, setup_logging  # noqa: E402
 logger = logging.getLogger(__name__)
 
 TIME_MODES = [("原样时间", MODE_TIME), ("空档压缩", MODE_SESSION), ("全局帧序号", MODE_INDEX)]
-MEASURE_COLUMNS = ["信号", "T1 值", "T2 值", "差值"]
+MEASURE_COLUMNS = ["信号", "T1 值", "T2 值", "差值", "最小", "最大", "均值"]
 
 
 def app_dir() -> str:
@@ -157,7 +157,8 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- 值表（测量）
     def _build_measure_dock(self) -> None:
-        self.delta_label = QLabel("未启用双光标：工具栏「双光标测量」或图形区右键可开启")
+        self.delta_label = QLabel("加入图形行后，这里显示每行的最小/最大/均值；"
+                                  "启用双光标还能测 T1/T2 与 ΔT")
         self.delta_label.setStyleSheet("padding:4px 6px; font-weight:bold;")
         self.measure_table = QTableWidget(0, len(MEASURE_COLUMNS))
         self.measure_table.setHorizontalHeaderLabels(MEASURE_COLUMNS)
@@ -165,7 +166,7 @@ class MainWindow(QMainWindow):
         self.measure_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         header = self.measure_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in (1, 2, 3):
+        for column in range(1, len(MEASURE_COLUMNS)):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
 
         panel = QWidget()
@@ -186,22 +187,27 @@ class MainWindow(QMainWindow):
         rows = self.graphic.measurements()
         if not rows:
             self.measure_table.setRowCount(0)
-            if not self.graphic.cursors_enabled:
-                self.delta_label.setText("未启用双光标：工具栏「双光标测量」或图形区右键可开启")
-            else:
-                self.delta_label.setText("双光标已启用：加入图形行后在此显示 T1 / T2 取值（在图形区拖动红线/蓝线）")
+            self.delta_label.setText("图形区还没有行：加入报文后这里会显示每行的最小/最大/均值"
+                                     "（启用双光标还会显示 T1/T2 取值与 ΔT）")
             return
-        delta = self.graphic.delta_t()
-        x1, x2 = self.graphic.cursor_positions()
-        if delta is None:
-            self.delta_label.setText("双光标未定位（拖动红线 T1 / 蓝线 T2）")
+        stats_note = "行统计 %d 行：最小 / 最大 / 均值" % len(rows)
+        if not self.graphic.cursors_enabled:
+            self.delta_label.setText("%s    |    未启用双光标（Ctrl+M 或图形区右键）："
+                                     "启用后可测 T1/T2 与 ΔT" % stats_note)
         else:
-            self.delta_label.setText(
-                "ΔT = %.6f s (%.3f ms)    T1 = %.6f    T2 = %.6f    行数 = %d"
-                % (delta, delta * 1000.0, x1, x2, len(rows)))
+            delta = self.graphic.delta_t()
+            x1, x2 = self.graphic.cursor_positions()
+            if delta is None:
+                self.delta_label.setText("%s    |    双光标未定位（拖动红线 T1 / 蓝线 T2）"
+                                         % stats_note)
+            else:
+                self.delta_label.setText(
+                    "ΔT = %.6f s (%.3f ms)    T1 = %.6f    T2 = %.6f    %s"
+                    % (delta, delta * 1000.0, x1, x2, stats_note))
         self.measure_table.setRowCount(len(rows))
         for index, item in enumerate(rows):
-            values = [item["name"], item["text1"], item["text2"], item["text_delta"]]
+            values = [item["name"], item["text1"], item["text2"], item["text_delta"],
+                      item["min_text"], item["max_text"], item["mean_text"]]
             for column, text in enumerate(values):
                 cell = self.measure_table.item(index, column)
                 if cell is None:
@@ -228,6 +234,25 @@ class MainWindow(QMainWindow):
         self.overlay_action.setShortcut("Ctrl+G")
         self.overlay_action.setToolTip("所有信号叠加到同一坐标系，共用一个 Y 轴")
         self.overlay_action.toggled.connect(self.graphic.set_overlay)
+
+        self.snap_action = QAction("吸附采样点", self)
+        self.snap_action.setCheckable(True)
+        self.snap_action.setChecked(True)
+        self.snap_action.setShortcut("Ctrl+Shift+L")
+        self.snap_action.setToolTip("鼠标读值与双光标吸附到真实帧时刻（避免“看起来 40、其实 39”）")
+        self.snap_action.toggled.connect(self.graphic.set_cursor_snap)
+
+        self.extremes_action = QAction("显示极值标记", self)
+        self.extremes_action.setCheckable(True)
+        self.extremes_action.setChecked(True)
+        self.extremes_action.setToolTip("在每行画 min/max 水平虚线")
+        self.extremes_action.toggled.connect(self.graphic.set_show_extremes)
+
+        self.readout_action = QAction("鼠标跟随读值", self)
+        self.readout_action.setCheckable(True)
+        self.readout_action.setChecked(True)
+        self.readout_action.setToolTip("鼠标移到曲线上时，在每行右上角显示该时刻的值")
+        self.readout_action.toggled.connect(self.graphic.set_readout_enabled)
 
         self.reset_cursor_action = QAction("重置光标位置", self)
         self.reset_cursor_action.triggered.connect(self._on_reset_cursors)
@@ -274,6 +299,7 @@ class MainWindow(QMainWindow):
         bar.addSeparator()
         bar.addAction(self.cursor_action)
         bar.addAction(self.overlay_action)
+        bar.addAction(self.snap_action)
         bar.addAction(self.reset_cursor_action)
         bar.addSeparator()
         bar.addAction(self.png_action)
@@ -301,6 +327,9 @@ class MainWindow(QMainWindow):
         menu_view = self.menuBar().addMenu("视图(&V)")
         menu_view.addAction(self.cursor_action)
         menu_view.addAction(self.overlay_action)
+        menu_view.addAction(self.snap_action)
+        menu_view.addAction(self.readout_action)
+        menu_view.addAction(self.extremes_action)
         menu_view.addAction(self.reset_cursor_action)
         menu_view.addAction(self.measure_dock_action)
 

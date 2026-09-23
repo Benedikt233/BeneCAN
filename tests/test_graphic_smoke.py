@@ -438,6 +438,7 @@ class TestGraphicSmoke(unittest.TestCase):
     def test_cursor_bar_drag_updates_cursors_and_measurements(self):
         self._add_counter_row()
         self.graphic.set_cursors_enabled(True)
+        self.graphic.set_cursor_snap(False)               # 关吸附 → 光标停在拖到的位置
         self.graphic.set_cursor_positions(0.1, 1.005)
         # 等价于"在条上把 T1 拖到 0.505 处"
         self.graphic.cursor_bar.dragged.emit(0, 0.505)
@@ -453,7 +454,11 @@ class TestGraphicSmoke(unittest.TestCase):
         self.graphic.cursor_bar.dragged.emit(0, 0.9)
         x1, x2 = self.graphic.cursor_positions()
         self.assertTrue(np.isnan(x1) and np.isnan(x2))    # 未启用时不接受拖动
-        self.assertEqual(self.graphic.measurements(), [])
+        # 未启用双光标时仍给出行统计，但 T1/T2 列为 "—"
+        measured = self.graphic.measurements()
+        self.assertEqual(len(measured), self.graphic.row_count())
+        self.assertEqual(measured[0]["text1"], "—")
+        self.assertEqual(measured[0]["text_delta"], "—")
 
     def test_cursor_bar_drag_clamped_to_view_range(self):
         self._add_counter_row()
@@ -478,6 +483,156 @@ class TestGraphicSmoke(unittest.TestCase):
         narrow = bar.x_to_px(0.0)
         bar.resize(bar.width() + 400, 22)
         self.assertGreater(bar.x_to_px(0.0), narrow)
+
+    # ------------------------------------------------- P0（Thursday）：读值 / 吸附 / 统计 / 极值
+    def test_readout_follows_mouse_position(self):
+        """鼠标读值：自由位置取"保持前一值"（与值表口径一致）。"""
+        self._add_counter_row()
+        self.graphic.set_cursor_snap(False)
+        self.graphic.set_readout_x(0.505)
+        self.assertEqual(self.graphic.readouts(), ["50"])        # 0.505 → 第 50 帧
+        self.assertIn("鼠标 t = 0.505000", self.graphic.header.text())
+        self.assertEqual(self.graphic.rows()[0].readout.textItem.toPlainText(), "50")
+
+    def test_readout_snaps_to_sample_by_default(self):
+        """默认吸附：读值位置落在真实采样点上，避免"看起来 40、其实 39"。"""
+        row = self._add_counter_row()
+        self.assertTrue(self.graphic.cursor_snap)
+        self.graphic.set_readout_x(0.505)
+        self.assertAlmostEqual(self.graphic.readout_x, float(row.x[50]), places=12)
+        self.assertIn("已吸附采样点", self.graphic.header.text())
+        self.assertEqual(self.graphic.readouts(), ["50"])
+
+    def test_readout_can_be_cleared_and_disabled(self):
+        self._add_counter_row()
+        self.graphic.set_readout_x(0.5)
+        self.assertIsNotNone(self.graphic.readout_x)
+        self.graphic.set_readout_x(None)
+        self.assertIsNone(self.graphic.readout_x)
+        self.assertEqual(self.graphic.readouts(), [""])
+        self.assertNotIn("鼠标", self.graphic.header.text())
+
+        self.window.readout_action.setChecked(False)             # 走主窗口动作
+        self.graphic.set_readout_x(0.5)
+        self.assertIsNone(self.graphic.readout_x)                # 关闭后不接受读值
+        self.window.readout_action.setChecked(True)
+
+    def test_mouse_move_maps_scene_position_to_readout(self):
+        from PySide6.QtCore import QPointF
+
+        row = self._add_counter_row()
+        self.graphic.resize(900, 400)
+        self.app.processEvents()
+        viewbox = row.plot.getViewBox()
+        target = float(row.x[50])
+        scene_pos = viewbox.mapViewToScene(QPointF(target, float(row.values[50])))
+        self.graphic._on_scene_mouse_moved(scene_pos)
+        self.assertIsNotNone(self.graphic.readout_x)
+        self.assertEqual(self.graphic.readouts(), ["50"])
+
+        self.graphic._on_scene_mouse_moved(QPointF(-5000.0, -5000.0))   # 移出绘图区
+        self.assertIsNone(self.graphic.readout_x)
+
+    def test_cursor_drag_snaps_to_sample(self):
+        row = self._add_counter_row()
+        self.graphic.set_cursors_enabled(True)
+        self.graphic.set_cursor_snap(True)
+        self.graphic.cursor_bar.dragged.emit(0, 0.505)
+        self.assertAlmostEqual(self.graphic.cursor_positions()[0], float(row.x[50]),
+                               places=12)
+        self.assertEqual(self.graphic.measurements()[0]["text1"], "50")
+
+    def test_cursor_drag_free_when_snap_disabled(self):
+        self._add_counter_row()
+        self.graphic.set_cursors_enabled(True)
+        self.graphic.set_cursor_snap(False)
+        self.graphic.cursor_bar.dragged.emit(0, 0.505)
+        self.assertAlmostEqual(self.graphic.cursor_positions()[0], 0.505, places=9)
+        self.assertEqual(self.graphic.measurements()[0]["text1"], "50")   # hold-last
+
+    def test_row_stats_match_manual(self):
+        row = self._add_counter_row()
+        values = row.values
+        self.assertEqual(row.stats["count"], len(values))
+        for key, expected in (("min", values.min()), ("max", values.max()),
+                              ("mean", values.mean()), ("std", values.std())):
+            self.assertAlmostEqual(row.stats[key], float(expected), places=9, msg=key)
+        self.assertEqual(row.min_text, "%d" % int(values.min()))
+        self.assertEqual(row.max_text, "%d" % int(values.max()))
+
+    def test_value_table_shows_stats_without_cursors(self):
+        row = self._add_counter_row()
+        self.assertFalse(self.graphic.cursors_enabled)
+        self.window._refresh_measure_table()
+        self.assertEqual(self.window.measure_table.rowCount(), 1)
+        self.assertEqual(self.window.measure_table.item(0, 1).text(), "—")     # T1
+        self.assertEqual(self.window.measure_table.item(0, 2).text(), "—")     # T2
+        self.assertEqual(self.window.measure_table.item(0, 4).text(), row.min_text)
+        self.assertEqual(self.window.measure_table.item(0, 5).text(), row.max_text)
+        self.assertIn("行统计", self.window.delta_label.text())
+
+    def test_extreme_markers_show_and_toggle(self):
+        row = self._add_counter_row()
+        self.assertTrue(self.graphic.show_extremes)
+        self.assertEqual(len(row.extreme_lines), 2)              # min + max
+        values = sorted(line.value() for line in row.extreme_lines)
+        self.assertAlmostEqual(values[0], row.stats["min"], places=9)
+        self.assertAlmostEqual(values[1], row.stats["max"], places=9)
+
+        self.window.extremes_action.setChecked(False)            # 走主窗口动作
+        self.assertEqual(row.extreme_lines, [])
+        self.window.extremes_action.setChecked(True)
+        self.assertEqual(len(row.extreme_lines), 2)
+
+    def test_constant_row_has_no_extreme_markers(self):
+        from signals.model import SignalSpec
+
+        # 样本里 0x17A 的 byte0 恒为 0x11
+        self.graphic.add_specs(SignalSpec(key=("canfd", 5, 0x17A), byte_offset=0,
+                                          name="常量字节"))
+        row = self.graphic.rows()[0]
+        self.assertEqual(row.stats["span"], 0.0)
+        self.assertEqual(row.extreme_lines, [])                  # 常量行不画两条重合线
+
+    def test_stats_survive_mode_and_overlay_switch(self):
+        row = self._add_counter_row()
+        before = dict(row.stats)
+        self.graphic.set_time_mode(MODE_INDEX)
+        self.window.overlay_action.setChecked(True)
+        self.assertEqual(row.stats, before)                      # 统计只与数值有关
+        self.assertEqual(len(row.extreme_lines), 2)              # 叠加模式同样标记极值
+        self.window.overlay_action.setChecked(False)
+        self.assertEqual(row.stats, before)
+
+    def test_every_row_gets_both_cursor_lines(self):
+        """双光标在每一行都要有镜像线，且各行位置一致。"""
+        from signals.model import SignalSpec
+
+        self.graphic.add_specs([
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="A"),
+            SignalSpec(key=("canfd", 4, 0x100), byte_offset=0, name="B")])
+        self.assertEqual(self.graphic.row_count(), 2)
+        self.window.cursor_action.setChecked(True)
+        self.assertEqual(len(self.graphic._cursor_lines), 4)     # 每行 T1 + T2
+        self.graphic.cursor_bar.dragged.emit(0, 0.505)
+        values = {round(line.value(), 6) for _i, _c, line in self.graphic._cursor_lines}
+        self.assertEqual(len(values), 2)                         # 只有 T1/T2 两个位置
+
+    def test_overlay_readout_merges_all_rows(self):
+        """叠加模式共用一处读值：多行合并显示 "信号 = 值"。"""
+        from signals.model import SignalSpec
+
+        self.graphic.add_specs([
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="A"),
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=0, name="B")])
+        self.window.overlay_action.setChecked(True)
+        self.graphic.set_readout_x(0.505)
+        owners = [row for row in self.graphic.rows() if row.readout is not None]
+        self.assertEqual(len(owners), 1)                         # 只有一行的图元承载读值
+        text = owners[0].readout.textItem.toPlainText()
+        self.assertIn("A = ", text)
+        self.assertIn("B = ", text)
+        self.assertIn("\n", text)                                # 多行合并
 
 
 DBC_TEXT = '''VERSION "1.0"
