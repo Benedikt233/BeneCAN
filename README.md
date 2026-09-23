@@ -1,11 +1,15 @@
-# SavvyCAN_AI — ASC Graphic Viewer
+# BeneCAN — ASC Graphic Viewer（V0.1）
 
 > 仅供学习使用。
 
 把上游工具导出的 `.asc` 日志变成类似 **Vector CANoe Graphic 窗口**的可视化与测量体验：
-多行堆叠曲线、共享时间轴、双光标 ΔT 测量、值表、CSV/PNG 导出、图形布局保存，可选接入 DBC。
+多行堆叠曲线、单坐标轴叠加、共享时间轴、双光标 ΔT 测量、值表、CSV/PNG 导出、图形布局保存，可选接入 DBC。
 
 数据来源：`Vehicle_log_tool_AI` 的 zst2asc 转换产物（`logCAN{n}.asc`）。
+
+> **关于名字**：V0.1 起本工具由 `SavvyCAN_AI` 更名为 **BeneCAN**。
+> 开发初期借用了开源项目 [SavvyCAN](https://github.com/collin80/savvycan) 的降采样思路作为参考，
+> 故当时以它命名；本项目与该项目**没有隶属或派生关系**，代码在评估后为自研实现。
 
 ---
 
@@ -23,18 +27,19 @@ python main.py "D:\日志解压目录"      # 目录也行：自动取里面最�
 ### 2. 打包成单 exe（分发）
 
 ```bash
-python -m PyInstaller savvycan.spec --noconfirm
-# 产物：dist\SavvyCAN_AI.exe（含示例 DBC，双击即用）
+python -m PyInstaller benecan.spec --noconfirm
+# 产物：dist\BeneCAN.exe（含示例 DBC，双击即用）
 ```
 
 打包后的目录结构（用户侧）：
 
 ```
 某个目录\
-├─ SavvyCAN_AI.exe
+├─ BeneCAN.exe
 ├─ dbc\                     ← 把你自己的 DBC 放这里（例如 CH5.dbc）
 │   ├─ example.dbc          ← 随包示例
 │   └─ channel_map.json     ← 通道映射配置（程序自动生成/更新）
+├─ logs\                    ← 运行日志（首次运行自动创建）
 └─ 你的日志\
 ```
 
@@ -106,7 +111,7 @@ python -m PyInstaller savvycan.spec --noconfirm
 也支持命令行（便于与上游工具联动）：
 
 ```bash
-SavvyCAN_AI.exe "D:\日志解压目录" --dbc dbc\CH5.dbc --channels 5,9
+BeneCAN.exe "D:\日志解压目录" --dbc dbc\CH5.dbc --channels 5,9
 ```
 
 `--channels` 只写通道号即可（帧类型自动识别）；确需强制指定时用 `canfd:5,classic:3`。
@@ -147,7 +152,7 @@ SavvyCAN_AI.exe "D:\日志解压目录" --dbc dbc\CH5.dbc --channels 5,9
 ```bash
 python main.py "<转换输出目录>"
 # 或打包版
-SavvyCAN_AI.exe "<转换输出目录>"
+BeneCAN.exe "<转换输出目录>"
 ```
 
 目录里若有多份 `.asc`，取**修改时间最新**的那份。
@@ -165,29 +170,55 @@ SavvyCAN_AI.exe "<转换输出目录>"
 | 图形渲染（12 行 / 114 万点） | 0.16 s |
 | 峰值内存（建索引） | 约 700 MB |
 
-索引缓存位置：`%TEMP%\SavvyCAN_AI\index\`（可用环境变量 `SAVVYCAN_AI_INDEX_DIR` 改到别处）。
+索引缓存位置：`%TEMP%\BeneCAN\index\`（可用环境变量 `BENECAN_INDEX_DIR` 改到别处）。
+> V0.1 更名为 BeneCAN 后缓存目录随之改变，旧索引不会命中（首次打开会重建一次，属正常）。
 
 ---
 
-## 六、开发与测试
+## 六、日志（排查问题先看这里）
+
+| 项 | 说明 |
+|---|---|
+| 位置 | `logs\BeneCAN_<日期>_<时间>.log`（源码运行 = 项目根；exe = **exe 同级**） |
+| 级别 | 测试调试阶段**默认 DEBUG（全量）** |
+| 临时改级别 | 启动前设置环境变量，如 `set BENECAN_LOG_LEVEL=INFO`（或 `WARNING`） |
+| 滚动 | 单文件 5 MB，保留 5 份 |
+| 内容 | 启动环境与版本、打开 ASC/索引命中与建索引用时、DBC 解析与映射、树填充、
+行增删与**图形重建耗时**、光标/布局切换、导出、**未捕获异常**、Qt 自身的告警 |
+| 兜底 | 未捕获异常与 Qt 的 qWarning/qFatal 都会写进同一份日志；日志目录不可写时自动退到临时目录 |
+
+日志示例：
+
+```
+2026-09-23 18:16:39.686 | DEBUG | ui.msg_tree      | 报文树填充完成：1 通道 / 63 报文 / 53 个 DBC 命中 | 耗时 26 ms
+2026-09-23 18:16:39.753 | DEBUG | ui.graphic_window| 重建图形：3 行 / 3213 点 | 多轴堆叠 | 时间轴 time | 双光标 False | 耗时 34 ms
+2026-09-23 18:16:39.907 | INFO  | ui.graphic_window| 图形区渲染 PNG：...\g.png（55.0 KB，耗时 56 ms）
+```
+
+---
+
+## 七、开发与测试
 
 ```bash
-python -m unittest discover -s tests      # 137 例，含离屏 GUI 冒烟测试
+python -m unittest discover -s tests      # 145 例，含离屏 GUI 冒烟测试与日志测试
 python tools\asc_inspect.py  <asc|目录>    # ASC 语法体检 + 时间轴归因
 python tools\asc_index.py    <asc|目录>    # 只建索引并出体积/耗时报告
 python tools\asc_crosscheck.py <asc>      # 与 python-can 逐帧交叉验证
 python tools\asc_query.py    <asc|索引> catalog|stats|profile|signals
 ```
 
-目录结构与各模块职责、里程碑与实测记录见 [开发计划.md](./开发计划.md)。
+- 版本管理：本地 git 仓库（`main` 分支），当前版本 `V0.1`（tag `V0.1`）
+- 测试用例与验收清单见 [测试计划.md](./测试计划.md)
+- 目录结构与各模块职责、里程碑与实测记录见 [开发计划.md](./开发计划.md)
 
 > 已知环境坑：`cantools`（bitstruct C 扩展）若在 **Qt 首次初始化之前**加载，进程会以
 > `0xC0000005` 崩溃；因此 `main.py` 把 Qt 导入放在最前，测试包也做了同样的顺序保证。
 
 ---
 
-## 七、参考
+## 八、参考
 
 - ASCII 日志格式：Vector ASC（`base hex timestamps absolute`），本工具兼容上游 zst2asc 的私有变体
   （CANFD 行尾 8 列常量、大写 `RX`、`SV:` SOA 行等）
 - 需求与里程碑、逐阶段实测数据：[开发计划.md](./开发计划.md)
+- 开源参考（仅思路借鉴，无代码依赖）：[SavvyCAN](https://github.com/collin80/savvycan)
