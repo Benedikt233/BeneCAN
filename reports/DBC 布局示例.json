@@ -1,0 +1,76 @@
+{
+  "tool": "SavvyCAN_AI",
+  "version": "0.1.0",
+  "source": "",
+  "time_mode": "time",
+  "x_range": [
+    167.42199000000028,
+    504.64521000000013
+  ],
+  "cursors": null,
+  "rows": [
+    {
+      "key": [
+        "canfd",
+        5,
+        378
+      ],
+      "byte_offset": 14,
+      "size": 1,
+      "dtype": "uint8",
+      "byte_order": "little",
+      "bit_index": -1,
+      "bit_length": 0,
+      "scale": 1.0,
+      "offset": 0.0,
+      "labels": {},
+      "color": "#1f77b4",
+      "source": "dbc",
+      "name": "Msg_0x17A.SigByte14",
+      "unit": "",
+      "step": false
+    },
+    {
+      "key": [
+        "canfd",
+        5,
+        378
+      ],
+      "byte_offset": 15,
+      "size": 1,
+      "dtype": "uint8",
+      "byte_order": "little",
+      "bit_index": -1,
+      "bit_length": 0,
+      "scale": 1.0,
+      "offset": 0.0,
+      "labels": {},
+      "color": "#d62728",
+      "source": "dbc",
+      "name": "Msg_0x17A.SigByte15",
+      "unit": "",
+      "step": false
+    },
+    {
+      "key": [
+        "canfd",
+        5,
+        378
+      ],
+      "byte_offset": 16,
+      "size": 1,
+      "dtype": "uint8",
+      "byte_order": "little",
+      "bit_index": 0,
+      "bit_length": 7,
+      "scale": 1.0,
+      "offset": 0.0,
+      "labels": {},
+      "color": "#2ca02c",
+      "source": "dbc",
+      "name": "Msg_0x17A.SigByte16",
+      "unit": "",
+      "step": false
+    }
+  ]
+}

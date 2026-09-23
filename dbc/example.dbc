@@ -1,0 +1,54 @@
+VERSION "1.0"
+
+NS_ :
+    NS_DESC_
+    CM_
+    BA_DEF_
+    BA_
+    VAL_
+    CAT_DEF_
+    CAT_
+    FILTER
+    BA_DEF_DEF_
+    EV_DATA_
+    ENVVAR_DATA_
+    SGTYPE_
+    SGTYPE_VAL_
+    BA_DEF_SGTYPE_
+    BA_SGTYPE_
+    SIG_TYPE_REF_
+    VAL_TABLE_
+    SIG_GROUP_
+    SIG_VALTYPE_
+    SIGTYPE_VALTYPE_
+    BO_TX_BU_
+    BA_DEF_REL_
+    BA_REL_
+    BA_DEF_DEF_REL_
+    BU_SG_REL_
+    BU_EV_REL_
+    BU_BO_REL_
+    SG_MUL_VAL_
+
+BS_:
+
+BU_: ECU Simulator
+
+// 说明：这是随工具分发的示例 DBC，用于验证「加载 DBC + 通道映射」流程。
+// 里面的报文 ID（0x17A / 0x1B4）在 TestZone 的样例日志里真实存在，
+// 把本文件映射到 CANFD ch5 / 经典 ch3 后即可直接看到信号名。
+// 换成你自己的 DBC（例如 CH5.dbc）时，放进同一个 dbc/ 目录即可。
+
+BO_ 378 Msg_0x17A: 20 ECU
+ SG_ SigByte14 : 112|8@1+ (1,0) [0|255] "" Simulator
+ SG_ SigByte15 : 120|8@1+ (1,0) [0|255] "" Simulator
+ SG_ SigByte16 : 128|7@1+ (1,0) [0|127] "" Simulator
+
+BO_ 436 Msg_0x1B4: 8 ECU
+ SG_ Status : 0|8@1+ (1,0) [0|255] "" Simulator
+ SG_ Counter : 56|8@1+ (1,0) [0|255] "" Simulator
+
+CM_ BO_ 378 "示例：对应日志中 20 字节载荷的 CANFD 报文（字节 14~16 有变化）";
+CM_ BO_ 436 "示例：对应日志中的经典 CAN 报文";
+
+VAL_ 436 Status 0 "Idle" 1 "Active" 2 "Fault" ;

@@ -1,0 +1,142 @@
+{
+  "tool": "SavvyCAN_AI",
+  "version": "0.1.0",
+  "source": "",
+  "time_mode": "time",
+  "x_range": [
+    167.42199000000028,
+    504.64521000000013
+  ],
+  "cursors": [
+    270.72810000000027,
+    271.72810000000027
+  ],
+  "rows": [
+    {
+      "key": [
+        "canfd",
+        5,
+        378
+      ],
+      "byte_offset": 14,
+      "size": 1,
+      "dtype": "uint8",
+      "byte_order": "little",
+      "bit_index": -1,
+      "bit_length": 0,
+      "scale": 1.0,
+      "offset": 0.0,
+      "labels": {},
+      "color": "#1f77b4",
+      "source": "auto-byte",
+      "name": "0x17A byte14",
+      "unit": "",
+      "step": false
+    },
+    {
+      "key": [
+        "canfd",
+        5,
+        378
+      ],
+      "byte_offset": 15,
+      "size": 1,
+      "dtype": "uint8",
+      "byte_order": "little",
+      "bit_index": -1,
+      "bit_length": 0,
+      "scale": 1.0,
+      "offset": 0.0,
+      "labels": {},
+      "color": "#d62728",
+      "source": "auto-byte",
+      "name": "0x17A byte15",
+      "unit": "",
+      "step": false
+    },
+    {
+      "key": [
+        "canfd",
+        9,
+        473
+      ],
+      "byte_offset": 0,
+      "size": 1,
+      "dtype": "uint8",
+      "byte_order": "little",
+      "bit_index": -1,
+      "bit_length": 0,
+      "scale": 1.0,
+      "offset": 0.0,
+      "labels": {},
+      "color": "#2ca02c",
+      "source": "auto-byte",
+      "name": "0x1D9 byte0",
+      "unit": "",
+      "step": false
+    },
+    {
+      "key": [
+        "canfd",
+        9,
+        473
+      ],
+      "byte_offset": 1,
+      "size": 1,
+      "dtype": "uint8",
+      "byte_order": "little",
+      "bit_index": -1,
+      "bit_length": 0,
+      "scale": 1.0,
+      "offset": 0.0,
+      "labels": {},
+      "color": "#ff7f0e",
+      "source": "auto-byte",
+      "name": "0x1D9 byte1",
+      "unit": "",
+      "step": false
+    },
+    {
+      "key": [
+        "classic",
+        3,
+        436
+      ],
+      "byte_offset": 6,
+      "size": 1,
+      "dtype": "uint8",
+      "byte_order": "little",
+      "bit_index": -1,
+      "bit_length": 0,
+      "scale": 1.0,
+      "offset": 0.0,
+      "labels": {},
+      "color": "#9467bd",
+      "source": "auto-byte",
+      "name": "0x1B4 byte6",
+      "unit": "",
+      "step": true
+    },
+    {
+      "key": [
+        "classic",
+        3,
+        436
+      ],
+      "byte_offset": 7,
+      "size": 1,
+      "dtype": "uint8",
+      "byte_order": "little",
+      "bit_index": -1,
+      "bit_length": 0,
+      "scale": 1.0,
+      "offset": 0.0,
+      "labels": {},
+      "color": "#8c564b",
+      "source": "auto-byte",
+      "name": "0x1B4 byte7",
+      "unit": "",
+      "step": true
+    }
+  ]
+}
