@@ -45,6 +45,8 @@ READOUT_BG = "#ffffffd8"
 SYMBOL = "o"                     # 采样点形状
 SYMBOL_SIZE = 5                  # 采样点直径（px）
 SYMBOL_MAX_POINTS = 3000         # 单行**可见**点数超过它就不画采样点（否则糊成色块且拖慢渲染）
+AXIS_LABEL_MAX_CHARS = 18        # Y 轴标题（竖排）超过该长度就退化成单位/不显示，避免被裁
+MAX_TICK_LABELS = 14             # 枚举信号最多在 Y 轴上标几个文本刻度（太多会挤成一团）
 
 MODE_LABELS = {
     "time": "时间 (s)",
@@ -249,8 +251,23 @@ class GraphicRow:
 
     @property
     def unit_text(self) -> str:
-        """Y 轴标题：DBC 里规定的单位（没有单位时为空）。"""
+        """DBC 里规定的单位（没有单位时为空）。"""
         return "[%s]" % self.spec.unit if self.spec.unit else ""
+
+    @property
+    def axis_text(self) -> str:
+        """Y 轴标题：优先 DBC 单位（短、信息量大），没有单位时退回短信号名。
+
+        轴标题是竖排的，能显示的字符数受**行高**限制（几十像素 ≈ 7~12 个字符），
+        所以长名字要截断 —— 完整名字仍横排显示在行内左上角。
+        """
+        if self.spec.unit:
+            return "[%s]" % self.spec.unit
+        name = self.spec.name or self.spec.default_name()
+        short = name.split(".")[-1]              # DBC 名字形如「报文.信号」→ 取信号段
+        if len(short) > AXIS_LABEL_MAX_CHARS:
+            return short[:AXIS_LABEL_MAX_CHARS - 1] + "…"
+        return short
 
     @property
     def min_text(self) -> str:
@@ -550,10 +567,18 @@ class GraphicWindow(QWidget):
                 return row
         return self._rows[0] if self._rows else None
 
-    def _on_scene_mouse_moved(self, scene_pos) -> None:
-        """鼠标在图形区移动 → 刷新每行右上角的读值（CANoe 的鼠标跟随读值）。"""
+    def _on_scene_mouse_moved(self, event) -> None:
+        """鼠标在图形区移动 → 刷新每行右上角的读值（CANoe 的鼠标跟随读值）。
+
+        注意：pyqtgraph 的 SignalProxy 会把信号参数**打包成 tuple** 再转发
+        （实测 `QRectF.contains(tuple)` 会抛 TypeError，异常被 Qt 吞掉 → 表现为"鼠标没反应"）。
+        这里统一归一化成 QPointF，别让参数形状变化再次打断功能。
+        """
         if not self._readout_enabled or not self._rows:
             return
+        scene_pos = event[0] if isinstance(event, (tuple, list)) else event
+        if not isinstance(scene_pos, QPointF):
+            scene_pos = QPointF(scene_pos)           # 兼容 QPoint 等可转换类型
         plot = next((row.plot for row in self._rows if row.plot is not None), None)
         if plot is None:
             return
@@ -954,8 +979,7 @@ class GraphicWindow(QWidget):
             plot = self.glw.addPlot(row=index, col=0)
             self._style_plot(plot)
             plot.setMinimumHeight(MIN_ROW_HEIGHT)
-            if row.unit_text:                # Y 轴标题 = DBC 里的单位
-                plot.setLabel("left", row.unit_text)
+            self._apply_axis_labels(plot, row)     # Y 轴标题 + 枚举文本刻度（来自 DBC）
             self._plot_curve(plot, row)
             row.plot = plot
             row.caption = self._add_caption(plot, row)
@@ -992,9 +1016,35 @@ class GraphicWindow(QWidget):
             if first:                          # 叠加模式所有行共用左上角一处读值
                 row.readout = self._add_readout(plot, row)
                 first = False
+        plot.setLabel("left", self._overlay_axis_text())
         plot.setLabel("bottom", MODE_LABELS.get(self._time_mode, ""))
         if self._cursors_enabled:
             self._build_cursor_lines(0, plot)
+
+    def _overlay_axis_text(self) -> str:
+        """叠加模式的共用 Y 轴标题：单位一致就写出来，否则说明是多信号叠加。"""
+        units = sorted({row.spec.unit for row in self._rows if row.spec.unit})
+        if len(units) == 1:
+            return "[%s]" % units[0]
+        if len(self._rows) > 1:
+            return "多信号叠加"
+        return self._rows[0].axis_text if self._rows else ""
+
+    def _apply_axis_labels(self, plot, row) -> None:
+        """Y 轴标题 + 枚举信号文本刻度。
+
+        - 标题：DBC 信号名 [单位]（太长时退化成 [单位]），让用户一眼知道这条轴来自 DBC 哪个信号
+        - 刻度：信号带 VAL_ 枚举时直接用文本（如 Off/On/Ready），而不是 0/1/2 数字
+        """
+        text = row.axis_text
+        if text:
+            plot.setLabel("left", text)
+        axis = plot.getAxis("left")
+        labels = row.spec.labels or {}
+        if not labels or len(labels) > MAX_TICK_LABELS:
+            axis.setTicks(None)
+            return
+        axis.setTicks([[(float(value), str(name)) for value, name in sorted(labels.items())]])
 
     def _add_caption(self, plot, row):
         """绘图区左上角的横排信号名。

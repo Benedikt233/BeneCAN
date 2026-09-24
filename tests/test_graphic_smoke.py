@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.indexer import build_index, default_index_path  # noqa: E402
 from core.query import MODE_INDEX, MODE_TIME, IndexReader  # noqa: E402
+from ui import graphic_window  # noqa: E402
 from ui.msg_tree import ROLE_KIND  # noqa: E402
 
 try:
@@ -187,14 +188,25 @@ class TestGraphicSmoke(unittest.TestCase):
         self.assertLessEqual(caption_rect.bottom(), viewbox_rect.bottom() + 1.0)
         self.assertLessEqual(caption_rect.right(), viewbox_rect.right() + 1.0)
 
-    def test_row_without_unit_has_no_axis_label(self):
+    def test_row_without_unit_shows_short_name_on_axis(self):
+        """没有单位的信号（DBC 里很常见）→ Y 轴显示短信号名，不能是一片空白。"""
         from signals.model import SignalSpec
 
         spec = SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="计数器")
         self.graphic.add_specs(spec)
         row = self.graphic.rows()[0]
         self.assertEqual(row.unit_text, "")
-        self.assertEqual(row.plot.getAxis("left").labelText, "")
+        self.assertEqual(row.plot.getAxis("left").labelText, "计数器")
+
+        # DBC 名字形如「报文.信号」→ 轴上只取信号段，过长则截断
+        spec2 = SignalSpec(key=("canfd", 5, 0x17A), byte_offset=0,
+                           name="E_IPUR_General.E_IPUR_TorqueLimit")
+        self.graphic.clear()
+        self.graphic.add_specs(spec2)
+        axis2 = self.graphic.rows()[0].plot.getAxis("left")
+        self.assertEqual(axis2.labelText, "E_IPUR_TorqueLimit")
+        self.assertEqual(self.graphic.rows()[0].label_text,
+                         "E_IPUR_General.E_IPUR_TorqueLimit")     # 行内仍是完整名字
 
     def test_overlay_mode_shares_one_y_axis(self):
         self.graphic.add_message(self.reader.find("canfd", 5, 0x17A))
@@ -667,8 +679,6 @@ class TestGraphicSmoke(unittest.TestCase):
     def test_point_markers_hidden_when_too_dense(self):
         from unittest import mock
 
-        from ui import graphic_window
-
         row = self._add_counter_row()
         self.assertTrue(row.marker_on)
         with mock.patch.object(graphic_window, "SYMBOL_MAX_POINTS", 100):
@@ -686,6 +696,85 @@ class TestGraphicSmoke(unittest.TestCase):
         self.window.symbols_action.setChecked(True)
         self.assertTrue(row.marker_on)
         self.assertEqual(row.curve.opts["symbol"], "o")
+
+    def test_mouse_move_through_real_event_chain(self):
+        """真机链路回归：真实鼠标事件 → scene.sigMouseMoved → SignalProxy → 读值。
+
+        历史 bug：SignalProxy 把参数打包成 tuple 转发，槽函数按单个 QPointF 解析
+        → `QRectF.contains(tuple)` 抛 TypeError，异常被 Qt 吞掉，表现为"鼠标划过没反应"。
+        """
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+
+        row = self._add_counter_row()
+        self.window.resize(900, 500)
+        self.window.show()
+        self.app.processEvents()
+
+        viewport = self.graphic.glw.viewport()
+        rect = viewport.rect()
+        QTest.mouseMove(viewport, QPoint(4, 4))
+        QTest.qWait(60)                        # SignalProxy 有 60 Hz 限流，等它 flush
+        QTest.mouseMove(viewport, QPoint(int(rect.width() * 0.5),
+                                         int(rect.height() * 0.4)))
+        QTest.qWait(60)
+
+        self.assertIsNotNone(self.graphic.readout_x, "真实鼠标移动没有触发读值")
+        self.assertIn("已吸附采样点", self.graphic.header.text())
+        self.assertTrue(self.graphic.readouts()[0], "读值文本为空")
+        self.assertEqual(row.readout.textItem.toPlainText(), self.graphic.readouts()[0])
+
+    def test_y_axis_title_prefers_dbc_name_and_unit(self):
+        from signals.model import SignalSpec
+
+        self.graphic.add_specs([
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="ActRotSpd", unit="rpm"),
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=2, name="TorqueLim", unit=""),
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=0,
+                       name="E_IPUR_General.E_AVeryLongSignalName", unit="")])
+        rows = self.graphic.rows()
+        self.assertEqual(rows[0].plot.getAxis("left").labelText, "[rpm]")   # 优先单位
+        self.assertEqual(rows[1].plot.getAxis("left").labelText, "TorqueLim")
+        # 太长（竖排轴标题受行高限制）→ 截断，完整名字仍在行内左上角
+        self.assertEqual(rows[2].plot.getAxis("left").labelText, "E_AVeryLongSignal…")
+        self.assertEqual(rows[2].label_text, "E_IPUR_General.E_AVeryLongSignalName")
+
+    def test_y_axis_uses_dbc_enum_text_ticks(self):
+        """枚举信号（DBC 的 VAL_）→ Y 轴刻度直接用文本，而不是 0/1/2 数字。
+
+        setTicks 的自定义刻度存在 AxisItem._tickLevels 里，绘制时直接取用
+        （tickValues/tickStrings 是"自动刻度"路径，看不到自定义刻度）。
+        """
+        from signals.model import SignalSpec
+
+        self.graphic.add_specs(
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="StMode", unit="",
+                       labels={0: "Off", 1: "Standby", 2: "Ready"}))
+        axis = self.graphic.rows()[0].plot.getAxis("left")
+        self.assertEqual(axis._tickLevels,
+                         [[(0.0, "Off"), (1.0, "Standby"), (2.0, "Ready")]])
+
+        # 枚举值过多时不做文本刻度（否则挤成一团）
+        many = {value: "S%d" % value for value in range(graphic_window.MAX_TICK_LABELS + 1)}
+        self.graphic.clear()
+        self.graphic.add_specs(
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="TooMany", labels=many))
+        self.assertIsNone(self.graphic.rows()[0].plot.getAxis("left")._tickLevels)
+
+    def test_overlay_axis_text_reports_shared_unit(self):
+        from signals.model import SignalSpec
+
+        self.graphic.add_specs([
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="A", unit="rpm"),
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=2, name="B", unit="rpm")])
+        self.window.overlay_action.setChecked(True)
+        self.assertEqual(self.graphic.rows()[0].plot.getAxis("left").labelText, "[rpm]")
+
+        self.graphic.clear()
+        self.graphic.add_specs([
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="A", unit="rpm"),
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=2, name="B", unit="V")])
+        self.assertEqual(self.graphic.rows()[0].plot.getAxis("left").labelText, "多信号叠加")
 
     def test_constant_row_has_no_extreme_markers(self):
         from signals.model import SignalSpec
