@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""日志模块测试：级别、落盘位置、中文与异常兜底。
+"""日志模块测试：级别、落盘位置、中文、异常兜底与 Qt 回调异常的可见性。
 
 运行： python -m unittest discover -s tests
 """
@@ -11,6 +11,8 @@ import shutil
 import sys
 import tempfile
 import unittest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")   # Qt 回调可见性用例需离屏
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -119,6 +121,47 @@ class TestLogSetup(unittest.TestCase):
         content = self._read_log(path)
         self.assertIn("未捕获异常", content)
         self.assertIn("测试用异常", content)
+
+    # ------------------------------------------------- Qt 回调异常的可见性
+    def test_qt_slot_exception_is_logged_as_unhandled(self):
+        """PySide6 6.x 会把 Python 回调里抛的异常交给 sys.excepthook，必须落进日志。
+
+        这是"界面点了没反应"的**唯一自动线索**：一旦这条链路断了（或被误判成"槽异常
+        会被静默吞掉"），排查就只能靠源码运行的终端输出，打包版则完全无从下手。
+        """
+        try:
+            from PySide6.QtCore import QObject, QTimer, Signal
+            from PySide6.QtWidgets import QApplication
+        except ImportError:
+            self.skipTest("未安装 PySide6")
+
+        path = log_setup.setup_logging(log_dir=os.path.join(self.tmpdir, "logs"),
+                                       console=False)
+        app = QApplication.instance() or QApplication([])
+
+        class Emitter(QObject):
+            ping = Signal()
+
+        class Receiver(QObject):
+            def on_ping(self):
+                raise TypeError("槽里抛出的异常")
+
+        emitter, receiver = Emitter(), Receiver()
+        emitter.ping.connect(receiver.on_ping)
+        QTimer.singleShot(0, emitter.ping)
+        QTimer.singleShot(50, app.quit)
+        saved_stderr, sys.stderr = sys.stderr, io.StringIO()   # 默认钩子会打印回溯，测试里静音
+        try:
+            app.exec()
+        finally:
+            sys.stderr = saved_stderr
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+
+        content = self._read_log(path)
+        self.assertIn("benecan.unhandled", content)
+        self.assertIn("未捕获异常", content)
+        self.assertIn("槽里抛出的异常", content)          # 回溯里的异常文本也在
 
     # ---------------------------------------------------------------- 小工具
     def test_format_helpers(self):

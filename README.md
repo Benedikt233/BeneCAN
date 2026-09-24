@@ -193,7 +193,10 @@ BeneCAN.exe "<转换输出目录>"
 | 滚动 | 单文件 5 MB，保留 5 份 |
 | 内容 | 启动环境与版本、打开 ASC/索引命中与建索引用时、DBC 解析与映射、树填充、
 行增删与**图形重建耗时**、光标/布局切换、导出、**未捕获异常**、Qt 自身的告警 |
-| 兜底 | 未捕获异常与 Qt 的 qWarning/qFatal 都会写进同一份日志；日志目录不可写时自动退到临时目录 |
+| 兜底 | 未捕获异常、Qt 的 qWarning/qFatal 都写进同一份日志。
+**Qt 槽里的异常也走这里**（PySide6 6.x 把 Python 回调抛出的异常交给 `sys.excepthook`，
+不会像旧版那样只往 stderr 打一份），所以"点了没反应"在日志里查得到；
+日志目录不可写时自动退到临时目录 |
 
 日志示例：
 
@@ -201,14 +204,18 @@ BeneCAN.exe "<转换输出目录>"
 2026-09-23 18:16:39.686 | DEBUG | ui.msg_tree      | 报文树填充完成：1 通道 / 63 报文 / 53 个 DBC 命中 | 耗时 26 ms
 2026-09-23 18:16:39.753 | DEBUG | ui.graphic_window| 重建图形：3 行 / 3213 点 | 多轴堆叠 | 时间轴 time | 双光标 False | 耗时 34 ms
 2026-09-23 18:16:39.907 | INFO  | ui.graphic_window| 图形区渲染 PNG：...\g.png（55.0 KB，耗时 56 ms）
+2026-09-24 08:35:19.900 | CRITICAL | benecan.unhandled | 未捕获异常     ← "点了没反应"的元凶，回溯紧随其后
 ```
+
+> 排查"界面点了没反应"：搜 `未捕获异常` 或 `benecan.unhandled`，回溯就在这一行下方。
+> 若确认整份日志里都没有，说明不是异常被吞，而是逻辑/信号未连接。
 
 ---
 
 ## 七、开发与测试
 
 ```bash
-python -m unittest discover -s tests      # 185 例，含离屏 GUI 冒烟与真实鼠标事件链路测试
+python -m unittest discover -s tests      # 186 例，含离屏 GUI 冒烟与真实鼠标事件链路测试
 python tools\asc_inspect.py  <asc|目录>    # ASC 语法体检 + 时间轴归因
 python tools\asc_index.py    <asc|目录>    # 只建索引并出体积/耗时报告
 python tools\asc_crosscheck.py <asc>      # 与 python-can 逐帧交叉验证

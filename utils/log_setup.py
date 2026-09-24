@@ -18,6 +18,8 @@
 3. **中文用 UTF-8**：Windows 默认 GBK，中文日志会乱码甚至抛异常，必须显式指定编码。
 4. **没有控制台也不报错**：打包版是窗口程序（console=False），`sys.stderr` 可能是 None。
 5. **兜底**：未捕获异常与 Qt 的 qWarning/qFatal 都写进同一份日志，便于事后定位崩溃。
+   其中 **Qt 槽里的异常也会走这里**（PySide6 6.x 把 Python 回调抛出的异常交给 `sys.excepthook`，
+   不会像旧版那样只往 stderr 打一份），所以"点了没反应"先搜 `benecan.unhandled`。
 """
 
 from __future__ import annotations
@@ -137,7 +139,12 @@ def _writable_dir(preferred: str) -> str:
 
 
 def install_excepthook() -> None:
-    """未捕获异常写进日志（否则窗口程序崩溃时什么都不剩）。"""
+    """未捕获异常写进日志（否则窗口程序崩溃时什么都不剩）。
+
+    **PySide6 6.x 会把 Python 回调（信号槽、QTimer、虚函数覆盖、QThread.run）
+    里抛出的异常交给这里**，所以"点了没反应"类的静默失效也能在日志里看到，
+    关键字是 `benecan.unhandled | 未捕获异常`（2026-09-24 的真实日志里有过 1574 条）。
+    """
     previous = sys.excepthook
 
     def hook(exc_type, exc_value, exc_traceback):
