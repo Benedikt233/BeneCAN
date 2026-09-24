@@ -724,6 +724,38 @@ class TestGraphicSmoke(unittest.TestCase):
         self.assertTrue(self.graphic.readouts()[0], "读值文本为空")
         self.assertEqual(row.readout.textItem.toPlainText(), self.graphic.readouts()[0])
 
+    def test_mouse_move_over_each_row_keeps_readout(self):
+        """多行堆叠：鼠标滑到**任意一行**都要有读值（历史 bug：只认第一行的坐标系，
+        滑到第二行就被判成"出绘图区"，读值被清空）。"""
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+
+        from signals.model import SignalSpec
+
+        self.graphic.add_specs([
+            SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, name="A"),
+            SignalSpec(key=("canfd", 4, 0x100), byte_offset=0, name="B")])
+        self.window.resize(900, 600)
+        self.window.show()
+        self.app.processEvents()
+        self.assertEqual(self.graphic.row_count(), 2)
+
+        viewport = self.graphic.glw.viewport()
+        for index, row in enumerate(self.graphic.rows()):
+            box = row.plot.getViewBox().sceneBoundingRect()
+            local = self.graphic.glw.mapFromScene(box.center())   # 场景坐标 → 视图坐标
+            QTest.mouseMove(viewport, QPoint(2, 2))
+            QTest.qWait(40)
+            QTest.mouseMove(viewport, QPoint(local.x(), local.y()))
+            QTest.qWait(40)
+            self.assertIsNotNone(self.graphic.readout_x,
+                                 "鼠标在第 %d 行上没有产生读值" % (index + 1))
+            texts = self.graphic.readouts()
+            self.assertEqual(len(texts), 2)
+            for position, text in enumerate(texts):
+                self.assertTrue(text, "第 %d 行读值为空（鼠标在第 %d 行）"
+                                % (position + 1, index + 1))
+
     def test_y_axis_title_prefers_dbc_name_and_unit(self):
         from signals.model import SignalSpec
 

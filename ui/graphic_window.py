@@ -521,11 +521,17 @@ class GraphicWindow(QWidget):
 
     def set_readout_x(self, x) -> None:
         """设定鼠标读值位置（None = 清除）。吸附策略在这里生效。"""
+        previous = self._readout_x
         if (not self._readout_enabled or x is None
                 or (isinstance(x, float) and np.isnan(x))):
             self._readout_x = None
         else:
             self._readout_x = float(self.snap_x(x))
+        if (previous is None) != (self._readout_x is None):
+            # 只在"开始/结束读值"时记一条，便于排查"鼠标读数没反应"这类问题
+            logger.debug("鼠标读值：%s", "无" if self._readout_x is None
+                         else "t = %.6f（%s）" % (self._readout_x,
+                                                 "已吸附采样点" if self._snap else "自由位置"))
         self._update_readouts()
         self.header.setText(self._header_text())
 
@@ -558,36 +564,38 @@ class GraphicWindow(QWidget):
             if row.readout is not None:
                 row.readout.setText(self._row_readout_text(row))
 
-    def _readout_base_row(self, scene_pos):
-        """吸附基准行：鼠标所在的那一行（不在任何行内时用第一行）。"""
+    def _row_at(self, scene_pos):
+        """鼠标落在哪一行的绘图区内（都不在则 None）；叠加模式只有一行坐标系。"""
         for row in self._rows:
             if row.plot is None:
                 continue
             if row.plot.getViewBox().sceneBoundingRect().contains(scene_pos):
                 return row
-        return self._rows[0] if self._rows else None
+        return None
 
     def _on_scene_mouse_moved(self, event) -> None:
         """鼠标在图形区移动 → 刷新每行右上角的读值（CANoe 的鼠标跟随读值）。
 
-        注意：pyqtgraph 的 SignalProxy 会把信号参数**打包成 tuple** 再转发
-        （实测 `QRectF.contains(tuple)` 会抛 TypeError，异常被 Qt 吞掉 → 表现为"鼠标没反应"）。
-        这里统一归一化成 QPointF，别让参数形状变化再次打断功能。
+        两处必须小心的地方：
+        1. pyqtgraph 的 SignalProxy 会把信号参数**打包成 tuple** 再转发
+           （实测 `QRectF.contains(tuple)` 抛 TypeError，异常被 Qt 吞掉 → 表现为"鼠标没反应"），
+           这里统一归一化成 QPointF。
+        2. 判定"鼠标在不在绘图区"必须用**鼠标所在那一行**的坐标系：
+           堆叠模式每行是独立坐标系，若固定用第一行判断，鼠标滑到第二行就会被误判成"区外"，
+           读值被清空 —— 表现就是"只有第一行能读值"。
         """
         if not self._readout_enabled or not self._rows:
             return
         scene_pos = event[0] if isinstance(event, (tuple, list)) else event
         if not isinstance(scene_pos, QPointF):
             scene_pos = QPointF(scene_pos)           # 兼容 QPoint 等可转换类型
-        plot = next((row.plot for row in self._rows if row.plot is not None), None)
-        if plot is None:
+        row = self._row_at(scene_pos)
+        if row is None:
+            self.set_readout_x(None)                 # 移出所有绘图区 → 收掉读值
             return
-        viewbox = plot.getViewBox()
-        if not viewbox.sceneBoundingRect().contains(scene_pos):
-            self.set_readout_x(None)                 # 移出绘图区 → 收掉读值
-            return
-        x = viewbox.mapSceneToView(scene_pos).x()
-        self.set_readout_x(self.snap_x(x, self._readout_base_row(scene_pos)))
+        # 鼠标所在的这一行既提供 x 映射（X 轴共享，各行为同一视图），也是吸附的基准行
+        x = row.plot.getViewBox().mapSceneToView(scene_pos).x()
+        self.set_readout_x(self.snap_x(x, row))
 
     def leaveEvent(self, event) -> None:
         self.set_readout_x(None)
