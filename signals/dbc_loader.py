@@ -29,14 +29,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import tempfile
 from dataclasses import dataclass, field
+from typing import Iterable
 
+from signals.channel_catalog import (ChannelMeta, channel_caption,
+                                     default_channels, default_meta)
 from signals.model import SRC_DBC, SignalSpec
 
 logger = logging.getLogger(__name__)
 
 CONFIG_NAME = "channel_map.json"
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
+CONFIG_VERSION_MIN = 1
 DBC_SUFFIXES = (".dbc", ".DBC")
 KINDS = ("canfd", "classic", "lin")
 KIND_TEXTS = {"canfd": "CANFD 帧", "classic": "经典 CAN 帧", "lin": "LIN 帧"}
@@ -355,6 +361,7 @@ class DbcLibrary:
     def __init__(self, dbc_dir: str):
         self.dbc_dir = os.path.abspath(dbc_dir)
         self.mappings = []
+        self.channels = default_channels()   # 通道号 -> ChannelMeta（名称/备注）
         self._files = {}                # 绝对路径 -> DbcFile
         self._errors = {}               # 绝对路径 -> 错误信息
 
@@ -364,23 +371,144 @@ class DbcLibrary:
         return os.path.join(self.dbc_dir, CONFIG_NAME)
 
     def load_config(self) -> None:
+        """读取 v1/v2 配置；v1 没有 channels 段时使用默认模板。"""
+        self.channels = default_channels()
         if not os.path.exists(self.config_path):
             self.mappings = []
             return
-        with open(self.config_path, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError) as exc:
+            logger.error("读取通道映射配置失败，按空配置启动：%s -> %s",
+                         self.config_path, exc)
+            self.mappings = []
+            return
+        if not isinstance(payload, dict):
+            logger.error("通道映射配置不是 JSON 对象，按空配置启动：%s",
+                         self.config_path)
+            self.mappings = []
+            return
+        version = payload.get("version", CONFIG_VERSION_MIN)
+        try:
+            version = int(version)
+        except (TypeError, ValueError):
+            version = CONFIG_VERSION_MIN
+        if version > CONFIG_VERSION:
+            logger.warning("通道映射配置版本 %s 高于当前支持的 %s，按兼容方式读取：%s",
+                           version, CONFIG_VERSION, self.config_path)
+        self._load_channels(payload.get("channels") or {})
         self.mappings = [ChannelMapping.from_dict(item)
                          for item in payload.get("mappings", [])]
-        logger.debug("读取通道映射配置：%s（%d 条）", self.config_path, len(self.mappings))
+        for mapping in self.mappings:
+            self.ensure_channels(mapping.channels)
+        logger.debug("读取通道映射配置：%s（v%s，%d 通道 / %d 条映射）",
+                     self.config_path, version, len(self.channels), len(self.mappings))
+
+    def _load_channels(self, data: dict) -> None:
+        """合并配置里的通道名称/备注；非法条目跳过并留日志。"""
+        if not isinstance(data, dict):
+            logger.warning("channels 段不是对象，忽略：%r", type(data).__name__)
+            return
+        for key, value in data.items():
+            try:
+                channel = int(key)
+            except (TypeError, ValueError):
+                logger.warning("忽略非法通道号：%r", key)
+                continue
+            meta = self.channels.get(channel) or ChannelMeta(channel)
+            if isinstance(value, str):
+                name, remark = value, meta.remark
+            elif isinstance(value, dict):
+                name = value.get("name", meta.name)
+                remark = value.get("remark", meta.remark)
+            else:
+                logger.warning("忽略通道 %s 的非法配置：%r", channel, value)
+                continue
+            meta.name = str(name).strip()
+            meta.remark = str(remark).strip()
+            self.channels[channel] = meta
 
     def save_config(self) -> str:
+        """原子写入配置，并在覆盖前留一份 .bak。
+
+        只写入相对默认模板发生过变化的通道（含模板外通道），
+        这样以后调整默认模板时，已有配置不会被旧默认值“钉死”。
+        """
         os.makedirs(self.dbc_dir, exist_ok=True)
         payload = {"version": CONFIG_VERSION,
+                   "channels": self._channel_payload(),
                    "mappings": [m.to_dict() for m in self.mappings]}
-        with open(self.config_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-        logger.debug("写入通道映射配置：%s（%d 条）", self.config_path, len(self.mappings))
+        directory = self.dbc_dir
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".tmp", prefix=".channel_map.",
+            dir=directory, delete=False)
+        temp_path = handle.name
+        try:
+            with handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if os.path.exists(self.config_path):
+                try:
+                    shutil.copy2(self.config_path, self.config_path + ".bak")
+                except OSError as exc:
+                    logger.warning("备份通道映射配置失败（继续写入）：%s", exc)
+            os.replace(temp_path, self.config_path)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+        logger.debug("写入通道映射配置：%s（%d 通道 / %d 条映射）",
+                     self.config_path, len(self.channels), len(self.mappings))
         return self.config_path
+
+    def _channel_payload(self) -> dict:
+        payload = {}
+        for channel, meta in sorted(self.channels.items()):
+            default = default_meta(channel)
+            if default is not None and meta.name == default.name \
+                    and meta.remark == default.remark:
+                continue
+            payload[str(channel)] = {"name": meta.name, "remark": meta.remark}
+        return payload
+
+    # -------------------------------------------------- 通道名称/备注
+    def ensure_channels(self, channels: Iterable[int]) -> None:
+        """把 ASC 发现的新通道追加进列表（名称留空，备注可编辑）。"""
+        for channel in channels or []:
+            try:
+                channel = int(channel)
+            except (TypeError, ValueError):
+                continue
+            self.channels.setdefault(channel, ChannelMeta(channel))
+
+    def channel_meta(self, channel: int) -> ChannelMeta:
+        channel = int(channel)
+        return self.channels.get(channel) or ChannelMeta(channel)
+
+    def channel_caption(self, channel: int) -> str:
+        meta = self.channel_meta(channel)
+        return channel_caption(channel, meta)
+
+    def set_channel_meta(self, channel: int, name: str = None,
+                         remark: str = None) -> ChannelMeta:
+        channel = int(channel)
+        meta = self.channels.get(channel) or ChannelMeta(channel)
+        if name is not None:
+            meta.name = str(name).strip()
+        if remark is not None:
+            meta.remark = str(remark).strip()
+        self.channels[channel] = meta
+        return meta
+
+    def reset_channel_template(self) -> None:
+        """恢复 1~21 的默认名称/备注；映射和模板外通道保持不变。"""
+        for channel, default in default_channels().items():
+            self.channels[channel] = default
+        logger.debug("恢复默认通道模板：%d 条", len(default_channels()))
 
     # -------------------------------------------------- 映射维护
     def resolve_path(self, dbc: str) -> str:
@@ -407,6 +535,7 @@ class DbcLibrary:
         （该 DBC 已加载过时可用；拿不到就按"任意帧类型"处理）。
         """
         channels = sorted({int(c) for c in channels})
+        self.ensure_channels(channels)
         dbc = self._as_config_path(dbc)
         if not kind:
             file = self._files.get(self.resolve_path(dbc))
@@ -427,6 +556,33 @@ class DbcLibrary:
         if 0 <= index < len(self.mappings):
             self.mappings.pop(index)
 
+    def mappings_for_channel(self, channel: int) -> list:
+        """该通道上的映射条目（按配置顺序，去重同一 DBC）。"""
+        channel = int(channel)
+        out, seen = [], set()
+        for mapping in self.mappings:
+            if channel not in mapping.channels or mapping.dbc in seen:
+                continue
+            seen.add(mapping.dbc)
+            out.append(mapping)
+        return out
+
+    def remove_mapping_for_channel(self, dbc: str, channel: int) -> bool:
+        """只移除某个 DBC 在指定通道上的映射，其他通道保持不变。"""
+        target = self._as_config_path(dbc)
+        channel = int(channel)
+        changed = False
+        for mapping in list(self.mappings):
+            if mapping.dbc != target or channel not in mapping.channels:
+                continue
+            mapping.channels = [c for c in mapping.channels if c != channel]
+            changed = True
+            if not mapping.channels:
+                self.mappings.remove(mapping)
+        if changed:
+            logger.debug("移除通道映射：%s ↛ ch%d", target, channel)
+        return changed
+
     def channels_for(self, dbc: str) -> list:
         """该 DBC 已映射的通道（供 UI 预勾选）。"""
         target = self._as_config_path(dbc)
@@ -435,6 +591,77 @@ class DbcLibrary:
             if mapping.dbc == target:
                 channels |= set(mapping.channels)
         return sorted(channels)
+
+    def apply_editor_state(self, channel_dbc: dict, names: dict = None,
+                           remarks: dict = None) -> dict:
+        """用 UI 的待提交状态整体替换映射，并更新通道名称/备注。
+
+        `channel_dbc` 形如 {5: ["E CAN.dbc"], 9: []}；值可以写绝对路径，
+        写入配置时统一转成相对 dbc/ 的路径。每个通道内的 DBC 顺序即
+        chip/拖入顺序，也决定同 ID 冲突时“第一个为准”的优先级。
+
+        解析失败的 DBC 会被跳过并记进返回值 errors，不会写入映射。
+        调用方负责随后 save_config()。
+        """
+        new_mappings = []
+        errors = {}
+        self._errors = {}
+        names = names or {}
+        remarks = remarks or {}
+        # v1 的 mappings[].comment 是历史字段：UI 不再编辑，但重建映射时不能丢。
+        legacy_comments = {}
+        for mapping in self.mappings:
+            if mapping.comment:
+                legacy_comments.setdefault(
+                    self._as_config_path(mapping.dbc), mapping.comment)
+        normalized = {}
+        for key, paths in (channel_dbc or {}).items():
+            try:
+                normalized[int(key)] = list(paths or [])
+            except (TypeError, ValueError):
+                logger.warning("忽略非法通道号：%r", key)
+
+        for channel in sorted(normalized):
+            self.ensure_channels([channel])
+            seen = set()
+            for dbc in normalized[channel]:
+                absolute = self.resolve_path(dbc)
+                key = os.path.abspath(absolute)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    file = self.load_dbc(key)
+                    kind = file.auto_kind
+                except Exception as exc:                 # noqa: BLE001
+                    errors[key] = "%s: %s" % (type(exc).__name__, exc)
+                    logger.error("DBC 解析失败，跳过映射：%s -> %s", key, exc)
+                    continue
+                config_path = self._as_config_path(key)
+                new_mappings.append(ChannelMapping(
+                    dbc=config_path, channels=[channel], kind=kind,
+                    comment=legacy_comments.get(config_path, "")))
+            if channel in names:
+                self.set_channel_meta(channel, name=names[channel])
+            if channel in remarks:
+                self.set_channel_meta(channel, remark=remarks[channel])
+
+        self.mappings = new_mappings
+        self._errors.update(errors)
+        logger.debug("应用通道映射编辑：%d 通道 / %d 条映射 / %d 个解析失败",
+                     len(self.channels), len(self.mappings), len(errors))
+        return {"mappings": len(self.mappings), "errors": errors}
+
+    def channel_conflicts(self, kind: str, channel: int) -> list:
+        """同通道上被多个 DBC 定义同一报文 ID 的列表 [(can_id, [message, ...])]。"""
+        buckets = {}
+        for file in self.files_for(kind, channel):
+            for can_id, message in file.messages.items():
+                bucket = buckets.setdefault(can_id, [])
+                if all(item.dbc_name != message.dbc_name for item in bucket):
+                    bucket.append(message)
+        return [(can_id, messages) for can_id, messages in sorted(buckets.items())
+                if len(messages) > 1]
 
     def clear(self) -> None:
         self.mappings = []
@@ -452,8 +679,19 @@ class DbcLibrary:
         self._errors.pop(key, None)
         return file
 
+    def invalidate_cache(self, path: str = None) -> None:
+        """丢弃解析缓存（重新扫描/文件被替换时用）。"""
+        if path is None:
+            self._files.clear()
+            self._errors.clear()
+            return
+        key = os.path.abspath(path)
+        self._files.pop(key, None)
+        self._errors.pop(key, None)
+
     def load_all(self) -> dict:
         """按配置加载全部 DBC，返回 {"loaded": n, "errors": {path: msg}}。"""
+        self._errors = {}
         for mapping in self.mappings:
             path = self.resolve_path(mapping.dbc)
             try:
@@ -500,7 +738,10 @@ class DbcLibrary:
     def stats(self) -> dict:
         messages = sum(len(f.messages) for f in self._files.values())
         signals = sum(f.signal_count for f in self._files.values())
+        mapped_channels = len({channel for mapping in self.mappings
+                               for channel in mapping.channels})
         return {"dbc_files": len(self._files), "mappings": len(self.mappings),
+                "channels": len(self.channels), "mapped_channels": mapped_channels,
                 "messages": messages, "signals": signals,
                 "errors": len(self._errors)}
 

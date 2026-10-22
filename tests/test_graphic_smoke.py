@@ -981,27 +981,16 @@ class TestDbcIntegration(unittest.TestCase):
                  if child.data(0, ROLE_KIND)}
         self.assertEqual(kinds, {"byte"})                       # 回到逐字节画像
 
-    def test_mapping_dialog_needs_no_frame_type_choice(self):
-        """导入 DBC 只需选文件 + 通道；帧类型由 DBC 自动识别并显示出来。"""
-        from PySide6.QtCore import Qt as QtCore
-
-        from ui.dialogs import DbcMappingDialog
-
-        dialog = DbcMappingDialog(self.dbc_dir,
-                                  [("canfd", 5, 30000), ("classic", 3, 10)],
-                                  library=self.window.dbc)
-        self.assertFalse(hasattr(dialog, "kind_box"))           # 不再有帧类型下拉框
-        self.assertEqual(dialog.channel_list.count(), 2)
-        dialog.discovered.setCurrentIndex(1)                    # 选中 CH5.dbc
-        summary = dialog.summary_label.text()
-        self.assertIn("自动识别", summary)
-        self.assertIn("1 报文 / 2 信号", summary)               # DBC 规模摘要
-        for index in range(dialog.channel_list.count()):
-            dialog.channel_list.item(index).setCheckState(QtCore.CheckState.Checked)
-        path, channels, comment = dialog.result_mapping()
-        self.assertEqual(os.path.basename(path), "CH5.dbc")
-        self.assertEqual(channels, [3, 5])
-        self.assertEqual(comment, "")
+    def test_channel_node_uses_channel_name_and_remark(self):
+        """树里的通道节点显示模板名称，备注进 tooltip。"""
+        self.window.dbc.set_channel_meta(5, name="E CAN TEST", remark="整车网络")
+        self.window._apply_dbc()
+        channel_item = next(
+            self.tree.topLevelItem(index)
+            for index in range(self.tree.topLevelItemCount())
+            if "ch5" in self.tree.topLevelItem(index).text(0))
+        self.assertIn("E CAN TEST", channel_item.text(0))
+        self.assertIn("备注：整车网络", channel_item.toolTip(0))
 
     def test_length_mismatch_warning_shown(self):
         """DBC 报文长度与日志不一致时给出提示节点。"""

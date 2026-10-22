@@ -1,0 +1,1519 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BeneCAN V0.3 · DBC 映射设置（交互原型）</title>
+<style>
+  :root {
+    --bg: #e9eef2;
+    --surface: #ffffff;
+    --surface-2: #f7fafb;
+    --surface-3: #eef4f6;
+    --text: #16232a;
+    --text-2: #52636c;
+    --muted: #83929a;
+    --border: #dbe3e8;
+    --border-strong: #c4d0d7;
+    --teal: #147688;
+    --teal-strong: #0c5f6e;
+    --teal-soft: #e6f3f6;
+    --teal-border: #b7d9e0;
+    --teal-text: #0f5c6a;
+    --warn: #9a5b00;
+    --warn-bg: #fff5e3;
+    --warn-border: #efcf97;
+    --danger: #b42318;
+    --danger-bg: #fdf1f0;
+    --danger-border: #f0c2bd;
+    --mono: "Cascadia Mono", "Consolas", "SFMono-Regular", monospace;
+    --shadow: 0 24px 60px rgba(23, 43, 54, .18), 0 2px 6px rgba(23, 43, 54, .08);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background:
+      radial-gradient(circle at 18% 8%, rgba(255,255,255,.92), transparent 42%),
+      var(--bg);
+    font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: rgba(20, 118, 136, .2); }
+
+  button, input { font: inherit; }
+  button { -webkit-tap-highlight-color: transparent; }
+  [hidden] { display: none !important; }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb {
+    background: #c8d5db;
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: #aebfc7; background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  .window {
+    position: relative;
+    width: min(1240px, 100%);
+    height: min(840px, calc(100vh - 48px));
+    min-height: 640px;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ---------------------------------------------------------------- 标题栏 */
+  .titlebar {
+    height: 44px;
+    flex: none;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    padding: 0 10px 0 12px;
+    color: #fff;
+    background: #1f7485;
+    border-bottom: 1px solid #175d6b;
+    user-select: none;
+  }
+  .title-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .app-mark {
+    width: 24px; height: 24px; border-radius: 6px;
+    background: rgba(255,255,255,.14);
+    border: 1px solid rgba(255,255,255,.22);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 800; letter-spacing: .02em;
+  }
+  .app-name { font-size: 12px; font-weight: 600; opacity: .95; white-space: nowrap; }
+  .version-chip {
+    display: inline-block; margin-left: 5px; padding: 1px 5px;
+    border-radius: 3px; background: rgba(255,255,255,.14);
+    font-family: var(--mono); font-size: 9.5px; font-weight: 600; letter-spacing: .04em;
+    vertical-align: 1px;
+  }
+  .title-center { font-size: 13px; font-weight: 600; letter-spacing: .03em; }
+  .title-right { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+  .proto-badge {
+    font-size: 10px; letter-spacing: .06em;
+    border: 1px dashed rgba(255,255,255,.5);
+    color: rgba(255,255,255,.92);
+    border-radius: 3px; padding: 2px 6px;
+    cursor: help;
+  }
+  .win-btn {
+    width: 28px; height: 24px; border: 0; border-radius: 4px;
+    background: transparent; color: rgba(255,255,255,.78);
+    font-size: 13px; line-height: 1; cursor: default;
+  }
+  .win-btn:hover { background: rgba(255,255,255,.13); color: #fff; }
+
+  /* ---------------------------------------------------------------- 目录栏 */
+  .subbar {
+    flex: none;
+    min-height: 56px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 14px;
+    background: #fbfcfd;
+    border-bottom: 1px solid var(--border);
+  }
+  .path-block { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+  .path-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .path-value {
+    max-width: 330px;
+    padding: 5px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--surface-3);
+    color: var(--text-2);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .asc-status {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 8px; border-radius: 999px;
+    border: 1px solid var(--border);
+    background: #fff; color: var(--text-2);
+    font-size: 10.5px; white-space: nowrap;
+  }
+  .asc-status.live { color: var(--teal-text); background: var(--teal-soft); border-color: var(--teal-border); }
+  .asc-status.idle { color: var(--muted); }
+  .live-dot, .idle-dot {
+    width: 6px; height: 6px; border-radius: 50%; flex: none;
+  }
+  .live-dot { background: #1c9a6b; box-shadow: 0 0 0 3px rgba(28,154,107,.12); }
+  .idle-dot { background: #b6c2c8; }
+
+  .subbar-actions { display: flex; align-items: center; gap: 7px; flex: none; }
+  .btn {
+    height: 30px; padding: 0 11px;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    background: #fff;
+    color: var(--text);
+    font-size: 12px; font-weight: 500;
+    cursor: pointer;
+    transition: background .12s ease, border-color .12s ease, color .12s ease;
+    white-space: nowrap;
+  }
+  .btn:hover { background: #f3f7f9; border-color: #aebdc5; }
+  .btn:active { transform: translateY(1px); }
+  .btn.primary { background: var(--teal); border-color: var(--teal); color: #fff; }
+  .btn.primary:hover { background: var(--teal-strong); border-color: var(--teal-strong); }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--text-2); }
+  .btn.ghost:hover { background: var(--surface-3); color: var(--text); }
+
+  .search {
+    display: flex; align-items: center; gap: 6px;
+    width: 168px; height: 30px; padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px; background: #fff;
+  }
+  .search:focus-within { border-color: var(--teal); box-shadow: 0 0 0 2px rgba(20,118,136,.12); }
+  .search svg { flex: none; color: var(--muted); }
+  .search input {
+    width: 100%; border: 0; outline: 0; background: transparent;
+    color: var(--text); font-size: 12px;
+  }
+  .search input::placeholder { color: #a0adb4; }
+
+  .scene-switch {
+    display: flex; align-items: center; height: 30px;
+    border: 1px solid var(--border); border-radius: 5px;
+    background: #fff; overflow: hidden;
+  }
+  .scene-switch button {
+    height: 100%; padding: 0 9px; border: 0; background: transparent;
+    color: var(--text-2); font-size: 11px; cursor: pointer; white-space: nowrap;
+  }
+  .scene-switch button:hover { background: var(--surface-3); }
+  .scene-switch button.active {
+    background: var(--teal-soft); color: var(--teal-text); font-weight: 600;
+    box-shadow: inset 0 -2px 0 var(--teal);
+  }
+
+  /* ---------------------------------------------------------------- 工作区 */
+  .workspace {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 356px minmax(0, 1fr);
+    background: #fff;
+  }
+  .library {
+    min-height: 0;
+    display: flex; flex-direction: column;
+    background: var(--surface-2);
+    border-right: 1px solid var(--border);
+  }
+  .channels { min-height: 0; display: flex; flex-direction: column; background: #fff; }
+
+  .pane-head {
+    height: 40px; flex: none;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 0 12px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,.72);
+  }
+  .library .pane-head { background: var(--surface-2); }
+  .pane-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; font-weight: 700; letter-spacing: .04em; white-space: nowrap;
+  }
+  .count {
+    padding: 1px 7px; border-radius: 999px;
+    background: var(--teal-soft); border: 1px solid var(--teal-border);
+    color: var(--teal-text);
+    font-family: var(--mono); font-size: 10px; font-weight: 600;
+  }
+  .pane-hint { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ---------------------------------------------------------------- DBC 库 */
+  .dbc-list {
+    flex: 1; min-height: 0;
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 8px; overflow: auto;
+  }
+  .dbc-item {
+    position: relative;
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr) 16px;
+    gap: 9px;
+    align-items: center;
+    padding: 8px 8px 8px 9px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: #fff;
+    cursor: grab;
+    transition: border-color .12s ease, background .12s ease, box-shadow .12s ease;
+  }
+  .dbc-item:hover { border-color: var(--border); box-shadow: 0 1px 2px rgba(23,43,54,.05); }
+  .dbc-item.selected { border-color: var(--teal-border); background: var(--teal-soft); }
+  .dbc-item.selected::before {
+    content: ""; position: absolute; left: 0; top: 8px; bottom: 8px;
+    width: 3px; border-radius: 0 3px 3px 0; background: var(--teal);
+  }
+  .dbc-item.is-error {
+    background: var(--danger-bg);
+    border-color: var(--danger-border);
+    cursor: not-allowed;
+  }
+  .dbc-item.is-error:hover { box-shadow: none; }
+
+  .dbc-icon {
+    position: relative;
+    width: 30px; height: 34px;
+    border-radius: 4px;
+    border: 1px solid #cfdde2;
+    background: #eef4f6;
+    color: var(--teal-text);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: 8.5px; font-weight: 700; letter-spacing: .04em;
+  }
+  .dbc-icon::after {
+    content: "";
+    position: absolute; top: -1px; right: -1px;
+    border-width: 0 7px 7px 0;
+    border-style: solid;
+    border-color: transparent #cfdde2 transparent transparent;
+  }
+  .dbc-item.is-error .dbc-icon {
+    background: #fbe6e4; border-color: #e7b4ae; color: var(--danger);
+  }
+  .dbc-item.is-error .dbc-icon::after { border-color: transparent #e7b4ae transparent transparent; }
+
+  .dbc-main { min-width: 0; }
+  .dbc-name {
+    font-size: 12.5px; font-weight: 600; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .dbc-item.is-error .dbc-name { color: var(--danger); }
+  .dbc-meta {
+    display: flex; align-items: center; gap: 5px;
+    margin-top: 2px;
+    font-size: 10.5px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .dbc-map {
+    margin-top: 3px;
+    font-size: 10.5px; color: var(--teal-text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .dbc-map.unmapped { color: var(--muted); }
+  .dbc-error-text {
+    margin-top: 3px; font-size: 10.5px; color: var(--danger);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .drag-grip { color: #a8b6bd; font-size: 14px; line-height: 1; text-align: center; }
+
+  .kind-pill, .source-pill {
+    display: inline-block; flex: none;
+    padding: 0 5px; border-radius: 3px;
+    font-size: 9.5px; font-weight: 600; line-height: 16px;
+    letter-spacing: .02em;
+  }
+  .kind-pill.canfd { color: var(--teal-text); background: #e2f2f5; border: 1px solid var(--teal-border); }
+  .kind-pill.classic { color: #5d6570; background: #eef1f3; border: 1px solid #d7dee2; }
+  .kind-pill.pending { color: #8a6500; background: #fff6df; border: 1px solid #eed59b; }
+  .source-pill { color: #4d6570; background: #eef3f5; border: 1px solid #d9e2e6; }
+
+  .library-foot {
+    flex: none;
+    padding: 8px 10px;
+    border-top: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .lib-note { font-size: 10.5px; line-height: 1.5; color: var(--muted); }
+  .lib-note b { color: var(--text-2); font-weight: 600; }
+
+  .empty-state {
+    padding: 26px 12px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 11.5px;
+    line-height: 1.7;
+    border: 1px dashed var(--border-strong);
+    border-radius: 6px;
+  }
+
+  /* ---------------------------------------------------------------- 通道 */
+  .channels-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+  .channel-row {
+    position: relative;
+    display: grid;
+    grid-template-columns: 8px 42px 140px 128px minmax(220px, 1fr) 160px 38px;
+    gap: 10px;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+    height: 46px;
+    padding: 0 10px;
+    border-bottom: 1px solid #eef2f4;
+    background: #fff;
+    transition: background .12s ease, box-shadow .12s ease;
+  }
+  .channel-row:hover { background: #f8fbfc; }
+  .channel-row.selected {
+    background: #edf8fa;
+    box-shadow: inset 3px 0 0 var(--teal);
+  }
+  .channel-row.dragover {
+    background: #e2f4f7;
+    box-shadow: inset 0 0 0 2px var(--teal);
+  }
+  .ch-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    border: 1.5px solid #c0ccd2; background: #fff;
+    justify-self: center;
+  }
+  .channel-row.mapped .ch-dot { background: var(--teal); border-color: var(--teal); }
+  .channel-row.warn .ch-dot { background: var(--warn); border-color: var(--warn); }
+
+  .ch-id {
+    font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+    color: var(--text-2); letter-spacing: -.02em;
+  }
+  .ch-name { min-width: 0; }
+  .ch-name input, .ch-remark input {
+    width: 100%;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text);
+    padding: 3px 5px;
+    outline: 0;
+    transition: border-color .12s ease, background .12s ease, box-shadow .12s ease;
+  }
+  .ch-name input { font-size: 12.5px; font-weight: 600; }
+  .ch-remark input { font-size: 11.5px; color: var(--text-2); }
+  .ch-name input:hover, .ch-remark input:hover {
+    border-color: var(--border); background: #fff;
+  }
+  .ch-name input:focus, .ch-remark input:focus {
+    border-color: var(--teal); background: #fff;
+    box-shadow: 0 0 0 2px rgba(20,118,136,.12);
+  }
+  .ch-remark input::placeholder { color: #a4b0b6; }
+
+  .ch-meta {
+    display: flex; align-items: center; gap: 6px; min-width: 0;
+    font-size: 10.5px; color: var(--muted);
+    white-space: nowrap; overflow: hidden;
+  }
+  .ch-frames { font-family: var(--mono); font-size: 10px; }
+  .warn-dot { color: var(--warn); font-size: 11px; line-height: 1; cursor: help; flex: none; }
+
+  .ch-map {
+    display: flex; align-items: center; gap: 5px;
+    min-width: 0; max-width: 100%; min-height: 26px;
+    overflow-x: auto; overflow-y: hidden;
+    white-space: nowrap;
+    scrollbar-width: thin;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 3px;
+    height: 23px; max-width: 190px; padding: 0 4px 0 7px;
+    border-radius: 4px;
+    border: 1px solid #bddfe5;
+    background: #eaf5f7;
+    color: var(--teal-text);
+    font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+    flex: none;
+  }
+  .chip-name {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chip:hover { background: #dff0f4; }
+  .chip.chip-warn {
+    background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn);
+  }
+  .chip-x {
+    border: 0; background: transparent; color: #5f8d95;
+    font-size: 12px; line-height: 1; padding: 0 2px; border-radius: 2px;
+    cursor: pointer;
+  }
+  .chip-x:hover { background: #cfe8ed; color: var(--teal-strong); }
+  .chip.chip-warn .chip-x { color: #a97825; }
+  .chip.chip-warn .chip-x:hover { background: #f4e3c4; color: var(--warn); }
+
+  .drop-slot {
+    flex: none;
+    padding: 3px 7px;
+    border: 1px dashed #c8d5db;
+    border-radius: 4px;
+    background: #fbfdfd;
+    color: #93a3aa;
+    font-size: 10.5px;
+  }
+  .channel-row.dragover .drop-slot {
+    border-color: var(--teal); color: var(--teal-text); background: #fff;
+  }
+
+  .row-clear {
+    border: 0; background: transparent; color: #9aabb2;
+    font-size: 10.5px; cursor: pointer;
+    padding: 3px 4px; border-radius: 3px;
+    opacity: 0; transition: opacity .12s ease, background .12s ease, color .12s ease;
+  }
+  .channel-row:hover .row-clear, .channel-row:focus-within .row-clear { opacity: 1; }
+  .row-clear:hover { background: #fdecea; color: var(--danger); }
+
+  /* ---------------------------------------------------------------- 底栏 */
+  .footer {
+    flex: none;
+    min-height: 56px;
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 14px;
+    border-top: 1px solid var(--border);
+    background: #fbfcfd;
+  }
+  .footer-left { display: flex; align-items: center; gap: 11px; white-space: nowrap; }
+  .sum { font-size: 11px; color: var(--text-2); }
+  .sum b { font-family: var(--mono); font-size: 12px; color: var(--text); font-weight: 700; }
+  .sum.danger b { color: var(--danger); }
+  .sep { width: 1px; height: 18px; background: var(--border); }
+
+  .footer-mid {
+    flex: 1; min-width: 0; text-align: center;
+    font-size: 10.5px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .save-state { display: inline-flex; align-items: center; gap: 6px; }
+  .save-dot { width: 6px; height: 6px; border-radius: 50%; background: #91a0a7; flex: none; }
+  .save-dot.dirty { background: #d48a00; box-shadow: 0 0 0 3px rgba(212,138,0,.12); }
+  .footer-right { display: flex; align-items: center; gap: 8px; flex: none; }
+
+  /* ---------------------------------------------------------------- 浮层 */
+  .toast {
+    position: fixed; left: 50%; bottom: 28px;
+    z-index: 120;
+    transform: translate(-50%, 12px);
+    max-width: 72vw;
+    padding: 9px 14px;
+    border-radius: 6px;
+    background: #1f2f36;
+    color: #fff;
+    font-size: 12px;
+    text-align: center;
+    box-shadow: 0 8px 24px rgba(0,0,0,.22);
+    opacity: 0; pointer-events: none;
+    transition: opacity .18s ease, transform .18s ease;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.success { background: #0f5c6a; }
+  .toast.warn { background: #7a4a00; }
+  .toast.danger { background: #8f1d14; }
+
+  .os-drop-overlay {
+    position: fixed; inset: 0; z-index: 90;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(10, 40, 48, .28);
+    backdrop-filter: blur(2px);
+    pointer-events: none;
+  }
+  .os-drop-card {
+    padding: 28px 42px;
+    border: 2px dashed var(--teal);
+    border-radius: 12px;
+    background: #fff;
+    text-align: center;
+    box-shadow: 0 24px 60px rgba(0,0,0,.22);
+  }
+  .os-drop-icon { font-size: 27px; line-height: 1; color: var(--teal); }
+  .os-drop-title { margin-top: 6px; font-size: 16px; font-weight: 700; }
+  .os-drop-sub { margin-top: 6px; font-size: 12px; color: var(--text-2); }
+
+  .modal-mask {
+    position: fixed; inset: 0; z-index: 110;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(16, 30, 36, .38);
+  }
+  .modal {
+    width: 420px; max-width: calc(100vw - 32px);
+    padding: 18px 20px;
+    border-radius: 10px;
+    background: #fff;
+    box-shadow: 0 24px 60px rgba(0,0,0,.24);
+  }
+  .modal-title { font-size: 14px; font-weight: 700; }
+  .modal-body {
+    margin-top: 8px;
+    font-size: 12px; line-height: 1.7; color: var(--text-2);
+    word-break: break-all;
+  }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+  .help-popover {
+    position: absolute; top: 104px; right: 18px; z-index: 100;
+    width: 356px; max-width: calc(100vw - 36px);
+    padding: 14px 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 18px 40px rgba(23,43,54,.18);
+  }
+  .help-popover h3 {
+    margin: 0 0 6px;
+    font-size: 12.5px; font-weight: 700;
+  }
+  .help-popover ol {
+    margin: 8px 0 0; padding-left: 18px;
+    font-size: 11.5px; line-height: 1.75; color: var(--text-2);
+  }
+  .help-popover li + li { margin-top: 2px; }
+  .help-popover .kbd {
+    display: inline-block; padding: 0 4px;
+    border: 1px solid var(--border-strong); border-bottom-width: 2px;
+    border-radius: 3px; background: #f7fafb;
+    font-family: var(--mono); font-size: 10px; color: var(--text-2);
+  }
+  .help-foot {
+    margin-top: 10px; padding-top: 8px;
+    border-top: 1px solid var(--border);
+    font-size: 10.5px; color: var(--muted);
+  }
+
+  .drag-ghost {
+    position: fixed; top: -100px; left: -100px;
+    padding: 6px 10px;
+    border-radius: 5px;
+    background: #123f49;
+    color: #fff;
+    font-size: 11px;
+    white-space: nowrap;
+    box-shadow: 0 8px 20px rgba(0,0,0,.2);
+  }
+  .drag-ghost b { font-family: var(--mono); }
+
+  :focus-visible { outline: 2px solid rgba(20,118,136,.5); outline-offset: 1px; }
+
+  @media (max-width: 1080px) {
+    body { padding: 14px; }
+    .window { height: calc(100vh - 28px); }
+    .workspace { grid-template-columns: 310px minmax(0, 1fr); }
+    .path-value { max-width: 190px; }
+    .search { width: 130px; }
+    .channel-row {
+      grid-template-columns: 8px 32px 110px 118px minmax(110px, 1fr) 96px 28px;
+      gap: 6px; padding: 0 8px;
+    }
+    .chip { max-width: 150px; }
+    .pane-hint { display: none; }
+  }
+  @media (max-width: 820px) {
+    body { padding: 0; align-items: stretch; }
+    .window { width: 100%; height: 100vh; min-height: 0; border-radius: 0; border: 0; }
+    .subbar { flex-wrap: wrap; min-height: 0; padding: 8px 10px; }
+    .path-block { flex-basis: 100%; }
+    .subbar-actions { width: 100%; flex-wrap: wrap; }
+    .search { flex: 1; width: auto; }
+    .workspace { grid-template-columns: 1fr; grid-template-rows: 250px minmax(0, 1fr); }
+    .library { border-right: 0; border-bottom: 1px solid var(--border); }
+    .channel-row {
+      grid-template-columns: 8px 30px 110px 118px minmax(110px, 1fr) 92px 26px;
+      gap: 6px; padding: 0 8px;
+    }
+    .chip { max-width: 110px; }
+    .footer { flex-wrap: wrap; padding: 8px 10px; gap: 8px; }
+    .footer-mid { order: 3; flex-basis: 100%; text-align: left; }
+  }
+</style>
+</head>
+<body>
+<div class="window" id="app">
+  <!-- 标题栏 -->
+  <header class="titlebar">
+    <div class="title-left">
+      <div class="app-mark">B</div>
+      <div class="app-name">BeneCAN <span class="version-chip">V0.3</span></div>
+    </div>
+    <div class="title-center">DBC 映射设置</div>
+    <div class="title-right">
+      <span class="proto-badge" title="示例数据，仅用于评审布局与交互，不代表真实解析结果">交互原型 · 示例数据</span>
+      <button class="win-btn" title="演示窗口，不提供最小化">—</button>
+      <button class="win-btn" title="演示窗口，不提供最大化">□</button>
+      <button class="win-btn" title="演示窗口，不提供关闭">×</button>
+    </div>
+  </header>
+
+  <!-- 目录与场景 -->
+  <div class="subbar">
+    <div class="path-block">
+      <span class="path-label">dbc/ 目录</span>
+      <code class="path-value" title="D:\Projects\SavvyCAN_AI\dbc">D:\Projects\SavvyCAN_AI\dbc</code>
+      <span class="asc-status live" id="ascStatus"></span>
+    </div>
+    <div class="subbar-actions">
+      <button class="btn" id="openDirBtn">打开目录</button>
+      <button class="btn" id="rescanBtn">重新扫描</button>
+      <label class="search" title="按文件名过滤 DBC">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"></circle>
+          <path d="M20 20l-3.5-3.5"></path>
+        </svg>
+        <input id="searchInput" placeholder="搜索 DBC…" autocomplete="off" />
+      </label>
+      <div class="scene-switch" role="group" aria-label="预览场景">
+        <button type="button" data-scene="asc" class="active">已打开 ASC</button>
+        <button type="button" data-scene="noasc">未打开 ASC</button>
+      </div>
+      <button class="btn ghost" id="helpBtn">交互说明</button>
+    </div>
+  </div>
+
+  <!-- 工作区 -->
+  <main class="workspace">
+    <aside class="library" aria-label="DBC 库">
+      <div class="pane-head">
+        <div class="pane-title">DBC 库 <span class="count" id="dbcCount">0</span></div>
+        <span class="pane-hint">拖到右侧通道</span>
+      </div>
+      <div class="dbc-list" id="dbcList" role="listbox" aria-label="dbc 目录下的 DBC 文件"></div>
+      <div class="library-foot">
+        <div class="lib-note">
+          可从资源管理器拖入 <b>.dbc</b> 文件，程序会自动复制到 <b>dbc/</b>；
+          同名文件会询问覆盖或跳过。
+        </div>
+      </div>
+    </aside>
+
+    <section class="channels" aria-label="通道映射">
+      <div class="pane-head">
+        <div class="pane-title">通道 <span class="count" id="channelCount">0</span></div>
+        <span class="pane-hint">拖动 DBC 到通道 · Ctrl 点选多行批量映射</span>
+      </div>
+      <div class="channels-scroll" id="channelList" role="listbox" aria-label="通道列表"></div>
+    </section>
+  </main>
+
+  <!-- 底栏 -->
+  <footer class="footer">
+    <div class="footer-left">
+      <span class="sum"><b id="statChannels">0</b> 通道</span>
+      <span class="sum"><b id="statMapped">0</b> 已映射</span>
+      <span class="sum"><b id="statLinks">0</b> 条映射</span>
+      <span class="sep" aria-hidden="true"></span>
+      <span class="sum" id="statErrorsWrap"><b id="statErrors">0</b> 解析失败</span>
+    </div>
+    <div class="footer-mid">
+      <span class="save-state" id="saveState"><span class="save-dot"></span>已保存 · channel_map.json v2</span>
+    </div>
+    <div class="footer-right">
+      <button class="btn ghost" id="resetBtn">恢复默认模板</button>
+      <button class="btn" id="cancelBtn">取消</button>
+      <button class="btn primary" id="applyBtn">应用</button>
+    </div>
+  </footer>
+
+  <!-- 交互说明 -->
+  <div class="help-popover" id="helpPopover" role="dialog" aria-label="交互说明" hidden>
+    <h3>交互说明</h3>
+    <ol>
+      <li>从左栏拖动 DBC 到右侧通道行；<span class="kbd">Ctrl</span> 点选多个 DBC 可一次拖入。</li>
+      <li><span class="kbd">Ctrl</span> 点选多条通道行，再拖入 DBC，可批量映射到这些通道。</li>
+      <li>通道名称、备注直接点开编辑；<span class="kbd">Esc</span> 撤销当前输入。</li>
+      <li>从资源管理器拖入 <b>.dbc</b> 会自动复制到 <b>dbc/</b>，同名文件询问覆盖/跳过。</li>
+      <li>所有改动先进入待提交状态；“应用”才写 <b>channel_map.json</b>，“取消”不落盘。</li>
+    </ol>
+    <div class="help-foot">顶部“已打开 ASC / 未打开 ASC”可预览两种场景；本页为示例数据。</div>
+  </div>
+
+  <!-- 外部文件拖入遮罩 -->
+  <div class="os-drop-overlay" id="osDropOverlay" hidden>
+    <div class="os-drop-card">
+      <div class="os-drop-icon">↓</div>
+      <div class="os-drop-title">松开以复制到 dbc/</div>
+      <div class="os-drop-sub">仅接受 .dbc 文件；同名文件会询问覆盖或跳过</div>
+    </div>
+  </div>
+
+  <!-- 同名文件提示 -->
+  <div class="modal-mask" id="dupMask" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dupTitle">
+      <div class="modal-title" id="dupTitle">dbc/ 中已存在同名文件</div>
+      <div class="modal-body" id="dupBody"></div>
+      <div class="modal-actions">
+        <button class="btn" id="dupSkip">跳过同名</button>
+        <button class="btn primary" id="dupOverwrite">覆盖同名</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 提示 -->
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+
+  const DEFAULT_CHANNELS = [
+    { ch: 1,  name: "I CAN",        remark: "" },
+    { ch: 2,  name: "D CAN",        remark: "" },
+    { ch: 3,  name: "B CAN",        remark: "" },
+    { ch: 4,  name: "C CAN",        remark: "" },
+    { ch: 5,  name: "E CAN",        remark: "" },
+    { ch: 6,  name: "IB CAN/AD CAN", remark: "" },
+    { ch: 7,  name: "TP CAN",       remark: "" },
+    { ch: 8,  name: "HP CAN",       remark: "" },
+    { ch: 9,  name: "LP CAN",       remark: "" },
+    { ch: 10, name: "P CAN",        remark: "" },
+    { ch: 11, name: "S CAN1",       remark: "" },
+    { ch: 12, name: "S CAN2",       remark: "" },
+    { ch: 13, name: "S CAN3",       remark: "" },
+    { ch: 14, name: "S CAN4",       remark: "" },
+    { ch: 15, name: "S CAN5",       remark: "" },
+    { ch: 16, name: "BP CAN",       remark: "" },
+    { ch: 17, name: "BL_CAN",       remark: "" },
+    { ch: 18, name: "LDCU LIN",     remark: "LIN to CAN" },
+    { ch: 19, name: "RDCU LIN",     remark: "LIN to CAN" },
+    { ch: 20, name: "CDCU LIN",     remark: "LIN to CAN" },
+    { ch: 21, name: "NGX_LIN",      remark: "" }
+  ];
+
+  // 模拟“已打开 ASC”的通道统计，用于展示帧类型/帧数/类型不符提示
+  const ASC_INFO = {
+    1:  { kind: "CANFD",   frames: 708846 },
+    2:  { kind: "CLASSIC", frames: 47829 },
+    3:  { kind: "CLASSIC", frames: 599086 },
+    4:  { kind: "CANFD",   frames: 574102 },
+    5:  { kind: "CANFD",   frames: 746579 },
+    9:  { kind: "CANFD",   frames: 433804 },
+    17: { kind: "CANFD",   frames: 320512 },
+    18: { kind: "CANFD",   frames: 50046 },
+    19: { kind: "CANFD",   frames: 27311 },
+    20: { kind: "CANFD",   frames: 12905 }
+  };
+
+  const INITIAL_DBCS = [
+    { file: "E CAN.dbc",    kind: "CANFD",   msgs: 172, sigs: 2718, status: "ok" },
+    { file: "LP CAN.dbc",   kind: "CANFD",   msgs: 98,  sigs: 1420, status: "ok" },
+    { file: "B CAN.dbc",    kind: "CLASSIC", msgs: 66,  sigs: 412,  status: "ok" },
+    { file: "I CAN.dbc",    kind: "CANFD",   msgs: 142, sigs: 2033, status: "ok" },
+    { file: "LDCU LIN.dbc", kind: "CANFD",   msgs: 31,  sigs: 260,  status: "ok" },
+    { file: "CH5.dbc",      kind: "CANFD",   msgs: 63,  sigs: 530,  status: "ok" },
+    { file: "example.dbc",  kind: "CANFD",   msgs: 1,   sigs: 2,    status: "ok" },
+    { file: "broken.dbc",   kind: "",        msgs: 0,   sigs: 0,    status: "error",
+      error: "解析失败：Unclosed string（第 218 行）" }
+  ];
+
+  const INITIAL_MAPPINGS = {
+    1:  ["I CAN.dbc"],
+    3:  ["B CAN.dbc"],
+    5:  ["E CAN.dbc", "CH5.dbc"],
+    9:  ["LP CAN.dbc"],
+    17: ["LDCU LIN.dbc"],
+    18: ["LDCU LIN.dbc"]
+  };
+
+  const dbcList = $("#dbcList");
+  const channelList = $("#channelList");
+  const searchInput = $("#searchInput");
+  const toastEl = $("#toast");
+  const saveState = $("#saveState");
+  const osDropOverlay = $("#osDropOverlay");
+  const dupMask = $("#dupMask");
+  const helpPopover = $("#helpPopover");
+
+  let state = createInitialState();
+  let snapshot = cloneEditor(state);
+  let selectedDbcs = new Set();
+  let selectedChannels = new Set();
+  let dirty = false;
+  let toastTimer = 0;
+  let osDragDepth = 0;
+  let pendingExternal = null;
+
+  function createInitialState() {
+    return {
+      hasAsc: true,
+      channels: DEFAULT_CHANNELS.map(item => ({ ...item })),
+      mappings: Object.fromEntries(
+        Object.entries(INITIAL_MAPPINGS).map(([key, files]) => [Number(key), files.slice()])
+      ),
+      dbcs: INITIAL_DBCS.map(item => ({ ...item }))
+    };
+  }
+
+  function cloneEditor(source) {
+    return {
+      channels: source.channels.map(item => ({ ...item })),
+      mappings: Object.fromEntries(
+        Object.entries(source.mappings).map(([key, files]) => [Number(key), files.slice()])
+      )
+    };
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, ch => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    })[ch]);
+  }
+
+  function formatFrames(value) {
+    return Number(value || 0).toLocaleString("en-US");
+  }
+
+  function kindText(kind) {
+    if (kind === "CLASSIC") return "经典 CAN";
+    if (kind === "CANFD") return "CANFD";
+    return "待解析";
+  }
+
+  function kindClass(kind) {
+    if (kind === "CLASSIC") return "classic";
+    if (kind === "CANFD") return "canfd";
+    return "pending";
+  }
+
+  function dbcByFile(file) {
+    return state.dbcs.find(item => item.file === file);
+  }
+
+  function mappingOf(channel) {
+    return state.mappings[channel] || [];
+  }
+
+  function mappedChannels(file) {
+    return state.channels
+      .filter(item => mappingOf(item.ch).includes(file))
+      .map(item => item.ch);
+  }
+
+  function channelInfo(channel) {
+    return state.hasAsc ? ASC_INFO[channel] || null : null;
+  }
+
+  function channelWarnings(item) {
+    const info = channelInfo(item.ch);
+    if (!info) return [];
+    return mappingOf(item.ch)
+      .map(file => dbcByFile(file))
+      .filter(dbc => dbc && dbc.kind && dbc.kind !== info.kind);
+  }
+
+  function countWarnings() {
+    return state.channels.reduce((total, item) => total + channelWarnings(item).length, 0);
+  }
+
+  function setDirty(value) {
+    dirty = Boolean(value);
+    renderFooter();
+  }
+
+  function toast(message, tone = "info") {
+    toastEl.textContent = message;
+    toastEl.className = "toast show " + tone;
+    clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => {
+      toastEl.className = "toast";
+    }, 2800);
+  }
+
+  /* ---------------------------------------------------------------- 渲染 */
+  function renderAll() {
+    renderDbcList();
+    renderChannels();
+    renderScene();
+    renderFooter();
+  }
+
+  function renderDbcList() {
+    const keyword = (searchInput.value || "").trim().toLowerCase();
+    const items = state.dbcs
+      .filter(item => !keyword || item.file.toLowerCase().includes(keyword))
+      .slice()
+      .sort((a, b) => {
+        const errorRank = (a.status === "error" ? 1 : 0) - (b.status === "error" ? 1 : 0);
+        if (errorRank !== 0) return errorRank;
+        return a.file.localeCompare(b.file, "en", { numeric: true, sensitivity: "base" });
+      });
+
+    if (!items.length) {
+      dbcList.innerHTML = '<div class="empty-state">没有匹配的 DBC<br>清空搜索或把 .dbc 拖进窗口</div>';
+    } else {
+      dbcList.innerHTML = items.map(item => {
+        const isError = item.status === "error";
+        const channels = mappedChannels(item.file);
+        const mappedText = channels.length
+          ? channels.map(ch => "ch" + ch).join(" · ")
+          : "未映射";
+        const meta = isError
+          ? ""
+          : [
+              item.source ? `<span class="source-pill">${item.source === "overwrite" ? "已覆盖" : "已复制"}</span>` : "",
+              `<span class="kind-pill ${kindClass(item.kind)}">${kindText(item.kind)}</span>`,
+              item.kind
+                ? `<span>${formatFrames(item.msgs)} 报文 · ${formatFrames(item.sigs)} 信号</span>`
+                : `<span>等待解析</span>`
+            ].join("");
+        const title = isError
+          ? item.file + " · " + item.error
+          : `${item.file} · ${kindText(item.kind)} · ${item.msgs} 报文 / ${item.sigs} 信号 · ` +
+            (channels.length ? "已映射 " + channels.map(ch => "ch" + ch).join("、") : "未映射");
+
+        return `
+          <div class="dbc-item ${isError ? "is-error" : ""} ${selectedDbcs.has(item.file) ? "selected" : ""}"
+               data-file="${escapeHtml(item.file)}"
+               draggable="${isError ? "false" : "true"}"
+               role="option"
+               aria-selected="${selectedDbcs.has(item.file)}"
+               title="${escapeHtml(title)}">
+            <div class="dbc-icon" aria-hidden="true">DBC</div>
+            <div class="dbc-main">
+              <div class="dbc-name">${escapeHtml(item.file)}</div>
+              ${isError
+                ? `<div class="dbc-error-text">${escapeHtml(item.error || "解析失败")}</div>`
+                : `<div class="dbc-meta">${meta}</div>
+                   <div class="dbc-map ${channels.length ? "" : "unmapped"}">${channels.length ? "→ " + escapeHtml(mappedText) : "未映射到通道"}</div>`}
+            </div>
+            <div class="drag-grip" aria-hidden="true">${isError ? "!" : "⠿"}</div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    $("#dbcCount").textContent = String(state.dbcs.length);
+  }
+
+  function renderChannels() {
+    channelList.innerHTML = state.channels.map(item => {
+      const info = channelInfo(item.ch);
+      const files = mappingOf(item.ch);
+      const warnings = channelWarnings(item);
+      const warningText = warnings.length
+        ? `帧类型不符：${warnings.map(dbc => `${dbc.file} 是 ${kindText(dbc.kind)}`).join("、")}，通道是 ${kindText(info.kind)}`
+        : "";
+      const kindPill = info
+        ? `<span class="kind-pill ${kindClass(info.kind)}">${kindText(info.kind)}</span>`
+        : (state.hasAsc ? `<span class="kind-pill pending">模板</span>` : "");
+      const framesText = info
+        ? `<span class="ch-frames">${formatFrames(info.frames)} 帧</span>`
+        : `<span>${state.hasAsc ? "日志中无此通道" : "模板通道"}</span>`;
+      const warnDot = warnings.length
+        ? `<span class="warn-dot" title="${escapeHtml(warningText)}">⚠</span>`
+        : "";
+
+      const chips = files.map(file => {
+        const dbc = dbcByFile(file);
+        const mismatch = Boolean(dbc && info && dbc.kind && dbc.kind !== info.kind);
+        return `
+          <span class="chip ${mismatch ? "chip-warn" : ""}"
+                data-file="${escapeHtml(file)}"
+                title="${escapeHtml(file + (mismatch ? " · 帧类型与通道不符" : " · 点击 × 取消映射"))}">
+            <span class="chip-name">${escapeHtml(file)}</span>
+            <button type="button" class="chip-x" aria-label="取消 ${escapeHtml(file)} 到 ch${item.ch} 的映射">×</button>
+          </span>
+        `;
+      }).join("");
+
+      const mapTitle = files.length
+        ? files.map(file => "ch" + item.ch + " ← " + file).join("\n")
+        : "";
+
+      return `
+        <div class="channel-row ${files.length ? "mapped" : ""} ${warnings.length ? "warn" : ""} ${selectedChannels.has(item.ch) ? "selected" : ""}"
+             data-ch="${item.ch}"
+             role="option"
+             aria-selected="${selectedChannels.has(item.ch)}"
+             aria-label="ch${item.ch} ${escapeHtml(item.name)}">
+          <span class="ch-dot" aria-hidden="true"></span>
+          <div class="ch-id">ch${item.ch}</div>
+          <div class="ch-name">
+            <input data-field="name" value="${escapeHtml(item.name)}"
+                   aria-label="ch${item.ch} 通道名称" spellcheck="false" />
+          </div>
+          <div class="ch-meta">${kindPill}${framesText}${warnDot}</div>
+          <div class="ch-map" title="${escapeHtml(mapTitle)}">
+            ${chips}
+            <span class="drop-slot">${files.length ? "+ 添加" : "+ 拖入 DBC"}</span>
+          </div>
+          <div class="ch-remark">
+            <input data-field="remark" value="${escapeHtml(item.remark)}"
+                   placeholder="备注（可选）" aria-label="ch${item.ch} 备注" spellcheck="false" />
+          </div>
+          ${files.length
+            ? `<button type="button" class="row-clear" title="清空 ch${item.ch} 的全部映射">清空</button>`
+            : `<span></span>`}
+        </div>
+      `;
+    }).join("");
+
+    $("#channelCount").textContent = String(state.channels.length);
+  }
+
+  function renderScene() {
+    const status = $("#ascStatus");
+    if (state.hasAsc) {
+      status.className = "asc-status live";
+      status.innerHTML = '<span class="live-dot"></span>已打开 logCAN572.asc · 3.3M 帧';
+    } else {
+      status.className = "asc-status idle";
+      status.innerHTML = '<span class="idle-dot"></span>未打开 ASC · 仅显示模板通道';
+    }
+    $$(".scene-switch button").forEach(button => {
+      button.classList.toggle("active", (button.dataset.scene === "asc") === state.hasAsc);
+    });
+  }
+
+  function renderFooter() {
+    const mapped = state.channels.filter(item => mappingOf(item.ch).length > 0).length;
+    const links = state.channels.reduce((total, item) => total + mappingOf(item.ch).length, 0);
+    const errors = state.dbcs.filter(item => item.status === "error").length;
+
+    $("#statChannels").textContent = String(state.channels.length);
+    $("#statMapped").textContent = String(mapped);
+    $("#statLinks").textContent = String(links);
+    $("#statErrors").textContent = String(errors);
+    $("#statErrorsWrap").classList.toggle("danger", errors > 0);
+
+    saveState.innerHTML = dirty
+      ? '<span class="save-dot dirty"></span>有未应用的更改 · channel_map.json v2'
+      : '<span class="save-dot"></span>已保存 · channel_map.json v2';
+  }
+
+  function syncDbcSelection() {
+    $$(".dbc-item", dbcList).forEach(item => {
+      const selected = selectedDbcs.has(item.dataset.file);
+      item.classList.toggle("selected", selected);
+      item.setAttribute("aria-selected", String(selected));
+    });
+  }
+
+  function syncChannelSelection() {
+    $$(".channel-row", channelList).forEach(row => {
+      const selected = selectedChannels.has(Number(row.dataset.ch));
+      row.classList.toggle("selected", selected);
+      row.setAttribute("aria-selected", String(selected));
+    });
+  }
+
+  /* ---------------------------------------------------------------- 左侧选择与拖拽 */
+  dbcList.addEventListener("click", event => {
+    const item = event.target.closest(".dbc-item");
+    if (!item) return;
+    if (item.classList.contains("is-error")) {
+      toast("该 DBC 解析失败，不能拖拽映射", "danger");
+      return;
+    }
+    const file = item.dataset.file;
+    if (event.ctrlKey || event.metaKey) {
+      if (selectedDbcs.has(file)) selectedDbcs.delete(file);
+      else selectedDbcs.add(file);
+    } else {
+      selectedDbcs = new Set([file]);
+    }
+    syncDbcSelection();
+  });
+
+  dbcList.addEventListener("dragstart", event => {
+    const item = event.target.closest(".dbc-item");
+    if (!item || item.classList.contains("is-error")) {
+      event.preventDefault();
+      return;
+    }
+    const file = item.dataset.file;
+    if (!selectedDbcs.has(file)) {
+      selectedDbcs = new Set([file]);
+      syncDbcSelection();
+    }
+    const files = Array.from(selectedDbcs).filter(name => {
+      const dbc = dbcByFile(name);
+      return dbc && dbc.status === "ok";
+    });
+    if (!files.length) {
+      event.preventDefault();
+      return;
+    }
+    const payload = JSON.stringify(files);
+    event.dataTransfer.setData("application/x-benecan-dbc", payload);
+    event.dataTransfer.setData("text/plain", payload);
+    event.dataTransfer.effectAllowed = "copy";
+
+    const ghost = document.createElement("div");
+    ghost.className = "drag-ghost";
+    ghost.innerHTML = files.length > 1
+      ? `<b>${files.length}</b> 个 DBC`
+      : `<b>${escapeHtml(files[0])}</b>`;
+    document.body.appendChild(ghost);
+    event.dataTransfer.setDragImage(ghost, 14, 14);
+    window.setTimeout(() => ghost.remove(), 0);
+  });
+
+  dbcList.addEventListener("dragend", clearDropHints);
+
+  /* ---------------------------------------------------------------- 右侧通道：选择、拖入、备注 */
+  channelList.addEventListener("click", event => {
+    const clearBtn = event.target.closest(".row-clear");
+    if (clearBtn) {
+      const row = clearBtn.closest(".channel-row");
+      const channel = Number(row.dataset.ch);
+      state.mappings[channel] = [];
+      setDirty(true);
+      renderAll();
+      toast(`已清空 ch${channel} 的映射`);
+      return;
+    }
+
+    const chipX = event.target.closest(".chip-x");
+    if (chipX) {
+      const row = chipX.closest(".channel-row");
+      const channel = Number(row.dataset.ch);
+      const chip = chipX.closest(".chip");
+      const file = chip.dataset.file;
+      state.mappings[channel] = mappingOf(channel).filter(name => name !== file);
+      setDirty(true);
+      renderAll();
+      toast(`已移除 ${file} → ch${channel}`);
+      return;
+    }
+
+    if (event.target.closest("input, .chip, .drop-slot")) return;
+
+    const row = event.target.closest(".channel-row");
+    if (!row) return;
+    const channel = Number(row.dataset.ch);
+    if (event.ctrlKey || event.metaKey) {
+      if (selectedChannels.has(channel)) selectedChannels.delete(channel);
+      else selectedChannels.add(channel);
+    } else {
+      selectedChannels = new Set([channel]);
+    }
+    syncChannelSelection();
+  });
+
+  channelList.addEventListener("dragover", event => {
+    const types = Array.from(event.dataTransfer.types || []);
+    if (!types.includes("application/x-benecan-dbc") && !types.includes("text/plain")) return;
+    const row = event.target.closest(".channel-row");
+    if (!row) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    row.classList.add("dragover");
+  });
+
+  channelList.addEventListener("dragleave", event => {
+    const row = event.target.closest(".channel-row");
+    if (!row) return;
+    if (!event.relatedTarget || !row.contains(event.relatedTarget)) {
+      row.classList.remove("dragover");
+    }
+  });
+
+  channelList.addEventListener("drop", event => {
+    if (event.dataTransfer.files && event.dataTransfer.files.length) return;
+    const row = event.target.closest(".channel-row");
+    if (!row) return;
+    event.preventDefault();
+    clearDropHints();
+
+    let files = [];
+    try {
+      const raw = event.dataTransfer.getData("application/x-benecan-dbc")
+        || event.dataTransfer.getData("text/plain")
+        || "[]";
+      files = JSON.parse(raw);
+    } catch (_error) {
+      files = [];
+    }
+    files = files.filter(name => {
+      const dbc = dbcByFile(name);
+      return dbc && dbc.status === "ok";
+    });
+    if (!files.length) return;
+
+    const target = Number(row.dataset.ch);
+    const targets = selectedChannels.has(target)
+      ? Array.from(selectedChannels).sort((a, b) => a - b)
+      : [target];
+
+    targets.forEach(channel => {
+      const list = state.mappings[channel] || (state.mappings[channel] = []);
+      files.forEach(file => {
+        if (!list.includes(file)) list.push(file);
+      });
+    });
+
+    selectedChannels.clear();
+    setDirty(true);
+    renderAll();
+    toast(`已映射 ${files.length} 个 DBC → ${targets.map(ch => "ch" + ch).join("、")}`, "success");
+  });
+
+  channelList.addEventListener("change", event => {
+    const input = event.target.closest("input[data-field]");
+    if (!input) return;
+    const row = input.closest(".channel-row");
+    const channel = Number(row.dataset.ch);
+    const field = input.dataset.field;
+    const item = state.channels.find(entry => entry.ch === channel);
+    if (!item) return;
+    const value = input.value.trim();
+    input.value = value;
+    if (item[field] === value) return;
+    item[field] = value;
+    setDirty(true);
+  });
+
+  channelList.addEventListener("keydown", event => {
+    if (!event.target.matches("input[data-field]")) return;
+    if (event.key === "Escape") {
+      const input = event.target;
+      const row = input.closest(".channel-row");
+      const channel = Number(row.dataset.ch);
+      const field = input.dataset.field;
+      const item = state.channels.find(entry => entry.ch === channel);
+      if (item) input.value = item[field];
+      input.blur();
+    }
+    if (event.key === "Enter") {
+      event.target.blur();
+    }
+  });
+
+  function clearDropHints() {
+    $$(".channel-row.dragover", channelList).forEach(row => row.classList.remove("dragover"));
+  }
+
+  /* ---------------------------------------------------------------- 场景切换 */
+  $$(".scene-switch button").forEach(button => {
+    button.addEventListener("click", () => {
+      const hasAsc = button.dataset.scene === "asc";
+      if (state.hasAsc === hasAsc) return;
+      state.hasAsc = hasAsc;
+      renderAll();
+      toast(hasAsc
+        ? "预览场景：已打开 ASC（显示帧类型与帧数）"
+        : "预览场景：未打开 ASC（显示 21 通道默认模板）");
+    });
+  });
+
+  /* ---------------------------------------------------------------- 外部文件拖入 */
+  function hasFiles(event) {
+    return Array.from((event.dataTransfer && event.dataTransfer.types) || []).includes("Files");
+  }
+
+  document.addEventListener("dragenter", event => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    osDragDepth += 1;
+    osDropOverlay.hidden = false;
+  });
+
+  document.addEventListener("dragover", event => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  });
+
+  document.addEventListener("dragleave", event => {
+    if (!hasFiles(event)) return;
+    osDragDepth = Math.max(0, osDragDepth - 1);
+    if (osDragDepth === 0) osDropOverlay.hidden = true;
+  });
+
+  document.addEventListener("drop", event => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    osDragDepth = 0;
+    osDropOverlay.hidden = true;
+    handleExternalFiles(Array.from(event.dataTransfer.files || []));
+  });
+
+  function handleExternalFiles(files) {
+    const dbcFiles = files.filter(file => file.name.toLowerCase().endsWith(".dbc"));
+    if (!dbcFiles.length) {
+      toast("仅支持 .dbc 文件", "warn");
+      return;
+    }
+    const existingNames = new Set(state.dbcs.map(item => item.file.toLowerCase()));
+    const fresh = dbcFiles.filter(file => !existingNames.has(file.name.toLowerCase()));
+    const duplicates = dbcFiles.filter(file => existingNames.has(file.name.toLowerCase()));
+
+    if (duplicates.length) {
+      pendingExternal = { fresh, duplicates };
+      $("#dupBody").textContent =
+        "以下文件已存在：" + duplicates.map(file => file.name).join("、") +
+        "。覆盖会用新文件替换 dbc/ 中的同名 DBC；跳过则保留原文件。";
+      dupMask.hidden = false;
+      $("#dupOverwrite").focus();
+      return;
+    }
+
+    addExternalFiles(fresh, false);
+    toast(`已复制 ${fresh.length} 个 DBC 到 dbc/（演示）`, "success");
+  }
+
+  function addExternalFiles(files, overwrite) {
+    files.forEach(file => {
+      const existing = state.dbcs.find(item => item.file.toLowerCase() === file.name.toLowerCase());
+      if (existing) {
+        if (!overwrite) return;
+        existing.kind = "";
+        existing.msgs = 0;
+        existing.sigs = 0;
+        existing.status = "ok";
+        existing.source = "overwrite";
+        existing.error = "";
+        return;
+      }
+      state.dbcs.push({
+        file: file.name,
+        kind: "",
+        msgs: 0,
+        sigs: 0,
+        status: "ok",
+        source: "copy"
+      });
+    });
+    setDirty(true);
+    renderAll();
+  }
+
+  $("#dupSkip").addEventListener("click", () => {
+    const pending = pendingExternal;
+    closeDupModal();
+    if (!pending) return;
+    addExternalFiles(pending.fresh, false);
+    toast(`已跳过 ${pending.duplicates.length} 个同名文件`, "warn");
+  });
+
+  $("#dupOverwrite").addEventListener("click", () => {
+    const pending = pendingExternal;
+    closeDupModal();
+    if (!pending) return;
+    addExternalFiles(pending.duplicates.concat(pending.fresh), true);
+    toast(`已覆盖 ${pending.duplicates.length} 个同名文件`, "warn");
+  });
+
+  function closeDupModal() {
+    dupMask.hidden = true;
+    pendingExternal = null;
+  }
+
+  /* ---------------------------------------------------------------- 搜索、扫描、目录 */
+  searchInput.addEventListener("input", renderDbcList);
+
+  $("#openDirBtn").addEventListener("click", () => {
+    toast("演示：将在资源管理器中打开 dbc/ 目录");
+  });
+
+  $("#rescanBtn").addEventListener("click", () => {
+    renderAll();
+    const errors = state.dbcs.filter(item => item.status === "error").length;
+    toast(`已重新扫描 dbc/：${state.dbcs.length} 个 DBC` + (errors ? `，${errors} 个解析失败` : ""),
+      errors ? "warn" : "info");
+  });
+
+  /* ---------------------------------------------------------------- 交互说明 */
+  $("#helpBtn").addEventListener("click", event => {
+    event.stopPropagation();
+    helpPopover.hidden = !helpPopover.hidden;
+  });
+
+  helpPopover.addEventListener("click", event => event.stopPropagation());
+
+  document.addEventListener("click", event => {
+    if (helpPopover.hidden) return;
+    if (!helpPopover.contains(event.target) && !$("#helpBtn").contains(event.target)) {
+      helpPopover.hidden = true;
+    }
+  });
+
+  /* ---------------------------------------------------------------- 底部动作 */
+  $("#resetBtn").addEventListener("click", () => {
+    state.channels = DEFAULT_CHANNELS.map(item => ({ ...item }));
+    selectedChannels.clear();
+    setDirty(true);
+    renderAll();
+    toast("已恢复 21 个通道的默认名称/备注（映射未变）");
+  });
+
+  $("#cancelBtn").addEventListener("click", () => {
+    const editor = cloneEditor(snapshot);
+    state.channels = editor.channels;
+    state.mappings = editor.mappings;
+    selectedChannels.clear();
+    setDirty(false);
+    renderAll();
+    toast("已取消，未写入 channel_map.json");
+  });
+
+  $("#applyBtn").addEventListener("click", () => {
+    commitInputs();
+
+    const emptyName = state.channels.find(item => !item.name.trim());
+    if (emptyName) {
+      toast(`ch${emptyName.ch} 的通道名称不能为空`, "danger");
+      const input = channelList.querySelector(`.channel-row[data-ch="${emptyName.ch}"] input[data-field="name"]`);
+      if (input) input.focus();
+      return;
+    }
+
+    if (!dirty) {
+      toast("没有需要应用的更改");
+      return;
+    }
+
+    const links = state.channels.reduce((total, item) => total + mappingOf(item.ch).length, 0);
+    const multi = state.channels.filter(item => mappingOf(item.ch).length > 1).length;
+    const warnings = countWarnings();
+
+    snapshot = cloneEditor(state);
+    setDirty(false);
+
+    let message = `已写入 dbc/channel_map.json：${state.channels.length} 通道 / ${links} 条映射`;
+    if (multi) message += `；${multi} 个通道含多个 DBC（同 ID 以拖入顺序为准）`;
+    if (warnings) message += `；${warnings} 个帧类型警示`;
+    toast(message, warnings ? "warn" : "success");
+  });
+
+  function commitInputs() {
+    $$("input[data-field]", channelList).forEach(input => {
+      const row = input.closest(".channel-row");
+      const channel = Number(row.dataset.ch);
+      const item = state.channels.find(entry => entry.ch === channel);
+      if (!item) return;
+      const value = input.value.trim();
+      input.value = value;
+      item[input.dataset.field] = value;
+    });
+  }
+
+  /* ---------------------------------------------------------------- 键盘 */
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    if (!dupMask.hidden) {
+      closeDupModal();
+      return;
+    }
+    if (!helpPopover.hidden) {
+      helpPopover.hidden = true;
+    }
+  });
+
+  /* ---------------------------------------------------------------- 启动 */
+  renderAll();
+})();
+</script>
+</body>
+</html>

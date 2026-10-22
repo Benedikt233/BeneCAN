@@ -27,8 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import APP_NAME, TOOL_VERSION  # noqa: E402
 from core.indexer import build_index, default_index_path, index_is_fresh  # noqa: E402
 from core.query import MODE_INDEX, MODE_SESSION, MODE_TIME, IndexReader  # noqa: E402
-from signals.dbc_loader import KIND_TEXTS, KINDS, DbcLibrary  # noqa: E402
-from ui.dialogs import DbcMappingDialog  # noqa: E402
+from signals.dbc_loader import KINDS, DbcLibrary  # noqa: E402
+from ui.dbc_mapping_dialog import DbcMappingDialog  # noqa: E402
 from ui.graphic_window import GraphicWindow  # noqa: E402
 from ui.msg_tree import MessageTree  # noqa: E402
 from utils import export as exporter  # noqa: E402
@@ -304,7 +304,7 @@ class MainWindow(QMainWindow):
         self.measure_dock_action.toggled.connect(
             lambda shown: self.measure_dock.setVisible(shown))
 
-        self.load_dbc_action = QAction("加载 DBC 并映射通道…", self)
+        self.load_dbc_action = QAction("DBC 映射设置…", self)
         self.load_dbc_action.triggered.connect(self.load_dbc)
         self.reload_dbc_action = QAction("重新加载 dbc/ 目录", self)
         self.reload_dbc_action.triggered.connect(self.reload_dbc)
@@ -380,36 +380,32 @@ class MainWindow(QMainWindow):
                 for channel in self._reader.channels()]
 
     def load_dbc(self) -> None:
-        """选 DBC 文件 → 选作用通道 → 写入 dbc/channel_map.json 并刷新树。
+        """打开 DBC 映射工作台：拖拽/改名/备注 → 应用后刷新报文树。
 
-        帧类型不用用户选：DBC 自己带着 VFrameFormat，加载时自动识别。
+        没有打开 ASC 也可以先维护通道模板与 DBC 映射；
+        帧类型不用用户选，DBC 自己带着 VFrameFormat，加载时自动识别。
         """
-        if self._reader is None:
-            QMessageBox.information(self, "提示", "请先打开一个 ASC 文件，"
-                                                "这样才能选择要映射的通道。")
-            return
         dialog = DbcMappingDialog(DBC_DIR, self._channel_choices(), self,
                                   library=self.dbc)
         if dialog.exec() != DbcMappingDialog.DialogCode.Accepted:
             return
-        path, channels, comment = dialog.result_mapping()
-        try:
-            file = self.dbc.load_dbc(path)
-        except Exception as exc:                          # noqa: BLE001
-            logger.error("DBC 解析失败：%s -> %s", path, exc, exc_info=True)
-            QMessageBox.critical(self, "DBC 解析失败",
-                                 "%s\n\n%s" % (path, exc))
-            return
-        mapping = self.dbc.add_mapping(path, channels, comment=comment)
-        self.dbc.save_config()
+
+        self.dbc.load_all()
         self._apply_dbc()
-        logger.info("加载 DBC 并映射通道：%s（帧类型 %s）→ %s", os.path.basename(path),
-                    mapping.kind or "自动", mapping.channels)
-        self.status_label.setText(
-            "已加载 DBC：%s（%s）→ 通道 %s（映射已写入 %s）    |    %s"
-            % (os.path.basename(path),
-               KIND_TEXTS.get(mapping.kind, "帧类型自动"), mapping.channels,
-               os.path.basename(self.dbc.config_path), file.describe()))
+        stats = self.dbc.stats()
+        summary = dialog.applied_summary or {}
+        logger.info("DBC 映射已应用：%s", summary or stats)
+        parts = ["已保存 DBC 映射",
+                 "%d 通道 / %d 已映射 / %d 条映射"
+                 % (stats["channels"], stats["mapped_channels"], stats["mappings"])]
+        if summary.get("multi_dbc_channels"):
+            parts.append("%d 个通道含多个 DBC（同 ID 以拖入顺序为准）"
+                         % summary["multi_dbc_channels"])
+        if summary.get("conflicts"):
+            parts.append("%d 个同 ID 冲突（以第一个为准）" % summary["conflicts"])
+        if stats["errors"]:
+            parts.append("%d 个 DBC 解析失败" % stats["errors"])
+        self.status_label.setText("    |    ".join(parts))
 
     def reload_dbc(self) -> None:
         self.dbc = DbcLibrary.open(DBC_DIR)

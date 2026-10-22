@@ -74,10 +74,18 @@ class MessageTree(QTreeWidget):
         self._dbc_hits = 0
         for channel in reader.channels():
             rate = channel.frames / channel.duration if channel.duration > 0 else 0.0
+            caption = ("ch%d" % channel.channel if self._library is None
+                       else self._library.channel_caption(channel.channel))
             node = QTreeWidgetItem(self, [
-                "%s ch%d" % (channel.kind.upper(), channel.channel),
+                "%s %s" % (channel.kind.upper(), caption),
                 "%d" % channel.frames, "", "%.0f 帧/秒" % rate])
             node.setData(0, ROLE_KIND, (NODE_CHANNEL, channel.kind, channel.channel))
+            if self._library is not None:
+                meta = self._library.channel_meta(channel.channel)
+                tooltip = caption
+                if meta.remark:
+                    tooltip += "\n备注：" + meta.remark
+                node.setToolTip(0, tooltip)
             node.setExpanded(False)
             self.addTopLevelItem(node)
             for msg in reader.catalog():

@@ -1,4 +1,4 @@
-# BeneCAN — ASC Graphic Viewer（V0.1）
+# BeneCAN — ASC Graphic Viewer（V0.3）
 
 > 仅供学习使用。
 
@@ -104,17 +104,21 @@ python -m PyInstaller benecan.spec --noconfirm
 （CANFD ch1/4/5/9/17/18/19/20 + 经典 ch3），所以必须指明「哪个 DBC 作用于哪个通道」。
 支持**多个 DBC 同时生效**，分别映射到不同通道。
 
-### 2. 怎么用
+### 2. 怎么用（V0.3 拖拽工作台）
 
-1. 把 DBC 拷进 exe（或项目）同级的 `dbc\` 目录，例如 `dbc\CH5.dbc`
-2. 打开一份 ASC（必须先打开日志，才能在对话框里选通道）
-3. 菜单 **DBC → 加载 DBC 并映射通道…** → 选文件 → **勾选该 DBC 描述的通道** → 确定
-4. 左侧树里对应报文会显示 DBC 报文名与信号（名称/单位/取值域），双击信号即可成行
-5. 映射写入 `dbc\channel_map.json`，**下次打开自动生效**，无需重复配置
+1. 把 DBC 拷进 exe（或项目）同级的 `dbc\` 目录，例如 `dbc\E CAN.dbc`；
+   也可以直接把 `.dbc` 从资源管理器拖进工作台，程序会**自动复制到 `dbc\`**。
+2. 菜单 **DBC → DBC 映射设置…** 打开工作台。**不打开 ASC 也能先配置**，
+   左侧是 `dbc\` 目录，右侧是 21 条默认通道模板（1~21，含通道名称与备注）。
+3. 把左侧 DBC **拖到右侧通道行**即完成映射；同一通道可以放多个 DBC，
+   同一 DBC 也可以拖到多条通道。按住 `Ctrl` 点选多条通道行，可一次批量映射。
+4. 通道名称、备注都可以**行内直接编辑**；备注会显示在左侧报文树的通道节点 tooltip 里。
+5. 点 **应用** 才写入 `dbc\channel_map.json`（v2）；点“取消”不会落盘。
+6. 左侧树里对应报文会显示 DBC 报文名与信号（名称/单位/取值域），双击信号即可成行。
 
 > **帧类型不需要你选**：DBC 自己带着（Vector `VFrameFormat` 属性，如 `CANFDStandard`），
-> 程序加载时自动识别，并把结果显示在对话框里（含报文数/信号数/帧格式/编码）。
-> 若 DBC 用 CANFD 却勾了经典 CAN 通道，对话框会给出橙色提醒。
+> 程序加载时自动识别，并把结果显示在工作台里（含报文数/信号数/帧格式/编码）。
+> 若 DBC 用 CANFD 却拖到经典 CAN 通道，行内会给出橙色 `⚠` 提醒，但仍允许保存。
 
 也支持命令行（便于与上游工具联动）：
 
@@ -124,19 +128,27 @@ BeneCAN.exe "D:\日志解压目录" --dbc dbc\CH5.dbc --channels 5,9
 
 `--channels` 只写通道号即可（帧类型自动识别）；确需强制指定时用 `canfd:5,classic:3`。
 
-`channel_map.json` 结构（可手改）：
+`channel_map.json` 结构（v2，可手改）：
 
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "channels": {
+    "5":  { "name": "E CAN", "remark": "整车网络" },
+    "18": { "name": "LDCU LIN", "remark": "LIN to CAN" }
+  },
   "mappings": [
-    { "dbc": "CH5.dbc", "kind": "canfd", "channels": [5, 9], "comment": "CH5 整车网络" },
-    { "dbc": "BMS.dbc", "channels": [17], "comment": "电池（帧类型自动）" }
+    { "dbc": "E CAN.dbc", "kind": "canfd", "channels": [5] },
+    { "dbc": "CH5.dbc", "channels": [5], "comment": "历史字段，可保留" },
+    { "dbc": "LDCU LIN.dbc", "kind": "canfd", "channels": [17, 18] }
   ]
 }
 ```
 
-`kind` 留空/不写 = 帧类型自动（由 DBC 判定）；程序写入时会把自动识别的结果记下来。
+- `channels` 只写**相对默认模板发生变化**的通道；没写的通道自动使用内置 21 条模板；
+- `kind` 留空/不写 = 帧类型自动（由 DBC 判定）；程序写入时会把自动识别的结果记下来；
+- v1 旧配置可直接读取（没有 `channels` 段时使用默认模板），无需手工迁移；
+- 写入采用临时文件 + `os.replace`，并在覆盖前留一份 `channel_map.json.bak`。
 
 ### 3. 已验证的能力与注意事项
 
@@ -148,8 +160,9 @@ BeneCAN.exe "D:\日志解压目录" --dbc dbc\CH5.dbc --channels 5,9
   全部报文同一种就据此限定映射，混用或没写则不限制（按任意帧类型匹配，避免 DBC 不生效）
 - **DBC 语法限制**：报文/信号**名字**必须是 ASCII（中文只能出现在单位、`VAL_` 枚举文本、`CM_` 注释里）
 - 若 DBC 报文长度与日志长度不一致，树里会给出提示行，提醒确认映射
-- 同一报文被多个 DBC 命中时以第一个为准（状态栏会提示）
+- 同一报文被多个 DBC 命中时以第一个为准（同通道内按拖入顺序，状态栏会提示）
 - 未加载 DBC 时全部功能照常可用（走逐字节自动识别）
+- DBC 解析失败的文件在工作台里标红、禁止拖拽；不会影响其他 DBC 与已有映射
 
 ---
 
@@ -215,16 +228,17 @@ BeneCAN.exe "<转换输出目录>"
 ## 七、开发与测试
 
 ```bash
-python -m unittest discover -s tests      # 186 例，含离屏 GUI 冒烟与真实鼠标事件链路测试
+python -m unittest discover -s tests      # 209 例，含离屏 GUI 冒烟、真实鼠标事件链路与 DBC 映射工作台
 python tools\asc_inspect.py  <asc|目录>    # ASC 语法体检 + 时间轴归因
 python tools\asc_index.py    <asc|目录>    # 只建索引并出体积/耗时报告
 python tools\asc_crosscheck.py <asc>      # 与 python-can 逐帧交叉验证
 python tools\asc_query.py    <asc|索引> catalog|stats|profile|signals
 ```
 
-- 版本管理：本地 git 仓库（`main` = V0.1；开发分支 `V0.2dev`，代号 Thursday）
+- 版本管理：本地 git 仓库（`main` = V0.1；开发分支 `V0.3dev`，从 `V0.2dev` 拉出）
 - 测试用例与人工验收清单（每条标了自动/人工）见 [测试计划.md](./测试计划.md)
 - 目录结构与各模块职责、里程碑、**对标 CANoe 的差距与路线（P0/P1/P2）** 见 [开发计划.md](./开发计划.md) §十八
+- **V0.3 DBC 映射工作台**（默认通道模板 / 拖拽映射 / 通道备注 / 配置 v2）见 [开发计划.md](./开发计划.md) §十九
 
 > 已知环境坑：`cantools`（bitstruct C 扩展）若在 **Qt 首次初始化之前**加载，进程会以
 > `0xC0000005` 崩溃；因此 `main.py` 把 Qt 导入放在最前，测试包也做了同样的顺序保证。

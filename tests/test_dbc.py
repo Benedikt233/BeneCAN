@@ -246,6 +246,107 @@ class TestDbcMapping(unittest.TestCase):
             os.rmdir(tmpdir)
 
 
+class TestChannelTemplate(unittest.TestCase):
+    """默认通道模板与配置 v2（不依赖 cantools）。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="asc_channel_tpl_")
+
+    def tearDown(self):
+        for root, _dirs, files in os.walk(self.tmpdir, topdown=False):
+            for name in files:
+                os.remove(os.path.join(root, name))
+            os.rmdir(root)
+
+    def test_default_template_matches_attachment(self):
+        from signals.channel_catalog import default_channels
+
+        channels = default_channels()
+        self.assertEqual(sorted(channels), list(range(1, 22)))
+        self.assertEqual(channels[1].name, "I CAN")
+        self.assertEqual(channels[6].name, "IB CAN/AD CAN")
+        self.assertEqual(channels[17].name, "BL_CAN")
+        self.assertEqual(channels[18].name, "LDCU LIN")
+        self.assertEqual(channels[18].remark, "LIN to CAN")
+        self.assertEqual(channels[19].remark, "LIN to CAN")
+        self.assertEqual(channels[20].remark, "LIN to CAN")
+        self.assertEqual(channels[21].name, "NGX_LIN")
+        self.assertEqual(channels[21].remark, "")
+
+    def test_v1_config_uses_default_template(self):
+        path = os.path.join(self.tmpdir, "channel_map.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1,
+                       "mappings": [{"dbc": "CH5.dbc", "channels": [5],
+                                     "kind": "canfd", "comment": "旧备注"}]},
+                      fh, ensure_ascii=False)
+        library = DbcLibrary(self.tmpdir)
+        library.load_config()
+        self.assertEqual(len(library.channels), 21)
+        self.assertEqual(library.channel_caption(5), "ch5 E CAN")
+        self.assertEqual(library.mappings[0].comment, "旧备注")
+        self.assertEqual(library.mappings[0].channels, [5])
+
+    def test_v2_round_trip_names_remarks_and_mappings(self):
+        library = DbcLibrary(self.tmpdir)
+        library.set_channel_meta(5, name="E CAN TEST", remark="整车网络")
+        library.set_channel_meta(22, name="EXTRA", remark="模板外通道")
+        library.add_mapping("CH5.dbc", [5], "canfd")
+        path = library.save_config()
+
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        self.assertEqual(payload["version"], 2)
+        self.assertEqual(payload["channels"]["5"],
+                         {"name": "E CAN TEST", "remark": "整车网络"})
+        self.assertEqual(payload["channels"]["22"],
+                         {"name": "EXTRA", "remark": "模板外通道"})
+        self.assertNotIn("1", payload["channels"])       # 默认值不写盘
+
+        reloaded = DbcLibrary(self.tmpdir)
+        reloaded.load_config()
+        self.assertEqual(reloaded.channel_meta(5).name, "E CAN TEST")
+        self.assertEqual(reloaded.channel_meta(5).remark, "整车网络")
+        self.assertEqual(reloaded.channel_meta(22).name, "EXTRA")
+        self.assertEqual(reloaded.channel_meta(1).name, "I CAN")
+        self.assertEqual(reloaded.channels_for("CH5.dbc"), [5])
+
+    def test_extra_channels_append_without_overwriting_template(self):
+        library = DbcLibrary(self.tmpdir)
+        library.ensure_channels([22, "23", 5])
+        self.assertIn(22, library.channels)
+        self.assertIn(23, library.channels)
+        self.assertEqual(library.channel_caption(22), "ch22")
+        self.assertEqual(library.channel_caption(5), "ch5 E CAN")
+
+    def test_remove_mapping_only_from_one_channel(self):
+        library = DbcLibrary(self.tmpdir)
+        library.add_mapping("A.dbc", [5, 9], "canfd")
+        library.add_mapping("B.dbc", [5], "canfd")
+        self.assertTrue(library.remove_mapping_for_channel("A.dbc", 5))
+        self.assertEqual(library.channels_for("A.dbc"), [9])
+        self.assertEqual(library.channels_for("B.dbc"), [5])
+        self.assertFalse(library.remove_mapping_for_channel("A.dbc", 5))
+
+    def test_reset_template_keeps_mappings_and_extra_channels(self):
+        library = DbcLibrary(self.tmpdir)
+        library.set_channel_meta(5, name="自定义", remark="自定义备注")
+        library.set_channel_meta(22, name="EXTRA", remark="模板外")
+        library.add_mapping("A.dbc", [5], "canfd")
+        library.reset_channel_template()
+        self.assertEqual(library.channel_meta(5).name, "E CAN")
+        self.assertEqual(library.channel_meta(5).remark, "")
+        self.assertEqual(library.channel_meta(22).name, "EXTRA")
+        self.assertEqual(library.channels_for("A.dbc"), [5])
+
+    def test_save_config_creates_backup(self):
+        library = DbcLibrary(self.tmpdir)
+        library.add_mapping("A.dbc", [5], "canfd")
+        library.save_config()
+        library.save_config()
+        self.assertTrue(os.path.exists(library.config_path + ".bak"))
+
+
 @unittest.skipUnless(HAS_CANTOOLS, "cantools 未安装，跳过 DBC 测试")
 class TestDbcLibrary(unittest.TestCase):
 
@@ -351,6 +452,49 @@ class TestDbcLibrary(unittest.TestCase):
         self.assertTrue(os.path.isabs(library.mappings[0].dbc))
         library.load_all()
         self.assertEqual(len(library.resolve_signals("canfd", 5, 0x100)), 5)
+
+    def test_apply_editor_state_preserves_chip_order_and_metadata(self):
+        library = DbcLibrary(self.dbc_dir)
+        other = os.path.join(self.dbc_dir, "Other.dbc")
+        ch5 = os.path.join(self.dbc_dir, "CH5.dbc")
+        library.add_mapping("Other.dbc", [5], "canfd", "旧版备注")
+        result = library.apply_editor_state(
+            {5: [other, ch5], 9: [ch5]},
+            names={5: "E CAN TEST"},
+            remarks={5: "整车网络"})
+        self.assertEqual(result["errors"], {})
+        self.assertEqual(len(library.mappings), 3)
+        self.assertEqual([os.path.basename(m.dbc) for m in
+                          library.mappings_for_channel(5)], ["Other.dbc", "CH5.dbc"])
+        self.assertEqual(library.mappings_for_channel(5)[0].comment, "旧版备注")
+        self.assertEqual(library.channel_meta(5).name, "E CAN TEST")
+        self.assertEqual(library.channel_meta(5).remark, "整车网络")
+        self.assertEqual([os.path.basename(m.dbc) for m in
+                          library.mappings_for_channel(9)], ["CH5.dbc"])
+
+        library.save_config()
+        reloaded = DbcLibrary.open(self.dbc_dir)
+        self.assertEqual(reloaded.channel_meta(5).name, "E CAN TEST")
+        self.assertEqual([os.path.basename(m.dbc) for m in
+                          reloaded.mappings_for_channel(5)],
+                         ["Other.dbc", "CH5.dbc"])
+
+    def test_apply_editor_state_skips_unparsable_dbc(self):
+        library = DbcLibrary(self.dbc_dir)
+        result = library.apply_editor_state({5: ["NoSuch.dbc"]})
+        self.assertEqual(result["mappings"], 0)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("NoSuch.dbc", next(iter(result["errors"])))
+
+    def test_channel_conflicts_detects_same_id(self):
+        library = DbcLibrary.open(self.dbc_dir)
+        library.apply_editor_state({
+            5: [os.path.join(self.dbc_dir, "CH5.dbc"),
+                os.path.join(self.dbc_dir, "Other.dbc")]})
+        library.load_all()
+        conflicts = library.channel_conflicts("canfd", 5)
+        self.assertEqual(len(conflicts), 3)              # DBC_TEXT 里有 3 个报文
+        self.assertTrue(all(len(messages) == 2 for _can_id, messages in conflicts))
 
 
 class TestDbcEncoding(unittest.TestCase):
@@ -467,7 +611,7 @@ class TestChannelMappingSerialization(unittest.TestCase):
             path = library.save_config()
             with open(path, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
-            self.assertEqual(payload["version"], 1)
+            self.assertEqual(payload["version"], 2)
             self.assertEqual(payload["mappings"][0]["dbc"], "a.dbc")
         finally:
             for name in os.listdir(tmpdir):
