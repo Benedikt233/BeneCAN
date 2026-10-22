@@ -21,12 +21,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QPoint, QPointF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QLabel, QMenu, QVBoxLayout, QWidget
 
-from core.query import MODE_INDEX, MODE_SESSION
+from core.query import MODE_GPS, MODE_INDEX, MODE_SESSION
 from signals import model as sigmodel
+from signals.gps_time import GpsTimeAxis
 from signals.stats import format_number, nearest_sample, stats_of
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,8 @@ MIN_ROW_HEIGHT = 54
 CURVE_WIDTH = 1.2
 CURSOR_COLORS = ("#d62728", "#1f77b4")
 CURSOR_NAMES = ("T1", "T2")
+SINGLE_CURSOR_COLOR = "#2ca02c"
+SINGLE_CURSOR_NAME = "光标"
 CURSOR_BAR_HEIGHT = 22
 CURSOR_HANDLE_W = 9
 CURSOR_HANDLE_H = 9
@@ -52,7 +55,31 @@ MODE_LABELS = {
     "time": "时间 (s)",
     "session": "时间 (空档压缩, s)",
     "index": "全局帧序号",
+    "gps": "GPS 时间",
 }
+
+
+class GpsAxisItem(pg.AxisItem):
+    """把时间轴的 X 值换算成 RTC 绝对时间刻度。"""
+
+    def __init__(self, orientation, axis_model: GpsTimeAxis, **kwargs):
+        super().__init__(orientation, **kwargs)
+        self._axis_model = axis_model
+
+    def tickStrings(self, values, scale, spacing):     # noqa: N802 - Qt 命名
+        if not values or self._axis_model is None:
+            return []
+        try:
+            values = list(values)
+            span = max(values) - min(values)
+            first_dt = self._axis_model.x_to_dt(values[0])
+            last_dt = self._axis_model.x_to_dt(values[-1])
+            include_date = span >= 6 * 3600 or first_dt.date() != last_dt.date()
+            with_ms = spacing is not None and spacing < 1.0
+            return [self._axis_model.format_x(value, include_date, with_ms)
+                    for value in values]
+        except Exception:                            # noqa: BLE001
+            return ["%.6f" % value for value in values]
 
 
 class CursorHandleBar(QWidget):
@@ -71,6 +98,7 @@ class CursorHandleBar(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.SizeHorCursor)
         self._enabled = False
+        self._single = False
         self._x_lo = 0.0
         self._x_hi = 1.0
         self._left_ratio = 0.0            # 绘图区左右边界（相对本控件宽度 0..1）
@@ -81,6 +109,10 @@ class CursorHandleBar(QWidget):
     # -------------------------------------------------- 状态输入
     def set_enabled_state(self, enabled: bool) -> None:
         self._enabled = bool(enabled)
+        self.update()
+
+    def set_single_state(self, single: bool) -> None:
+        self._single = bool(single)
         self.update()
 
     def set_x_range(self, x_lo: float, x_hi: float) -> None:
@@ -121,6 +153,8 @@ class CursorHandleBar(QWidget):
         return self._x_lo + ratio * (self._x_hi - self._x_lo)
 
     def _nearest_index(self, x: float) -> int:
+        if self._single:
+            return 0
         v1, v2 = self._values
         if np.isnan(v1):
             return 0
@@ -175,7 +209,7 @@ class CursorHandleBar(QWidget):
             painter.drawText(self.rect().adjusted(int(self.px_left) if self.px_left else 8,
                                                   0, -8, 0),
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                             "双光标未启用（工具栏或右键开启）" if not self._enabled
+                             "光标测量未启用（工具栏或右键开启）" if not self._enabled
                              else "光标手柄")
             return
 
@@ -186,7 +220,7 @@ class CursorHandleBar(QWidget):
                 continue
             px = self.x_to_px(value)
             positions.append(px)
-            color = QColor(CURSOR_COLORS[index])
+            color = QColor(SINGLE_CURSOR_COLOR if self._single else CURSOR_COLORS[index])
             # 手柄：倒三角 + 竖线，命中区域由整个控件承担，故此处只需画得清楚
             triangle = QPolygonF([
                 QPointF(px - CURSOR_HANDLE_W / 2.0, 0.0),
@@ -302,6 +336,7 @@ class GraphicWindow(QWidget):
     rowsChanged = Signal()
     statusMessage = Signal(str)
     cursorChanged = Signal(float, float)      # T1 / T2 的 x 位置（未启用时为 nan）
+    timeModeChanged = Signal(str)             # GPS 不可用时会自动回退到 time
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -309,12 +344,16 @@ class GraphicWindow(QWidget):
 
         self._reader = None
         self._time_mode = "time"
+        self._gps_axis = None
+        self._gps_boundaries = []
         self._origin = 0.0
         self._overlay = False                # True = 单坐标轴叠加（全部行共用 Y 轴）
         self._rows = []
         self._color_index = 0
         self._cursors_enabled = False
         self._cursor_values = [float("nan"), float("nan")]
+        self._single_cursor_enabled = False
+        self._single_cursor_value = float("nan")
         self._cursor_lines = []              # [(row_index, cursor_index, InfiniteLine)]
         self._syncing = False
         self._range_sources = []             # 各坐标系 ViewBox（监听缩放/平移）
@@ -324,6 +363,12 @@ class GraphicWindow(QWidget):
         self._show_extremes = True           # 行内极值标记线（全局默认，可被单行覆盖）
         self._show_symbols = True            # 采样点标记（放大到一定密度自动出现）
         self._marker_rows_shown = None       # 上次"画了采样点"的行数（仅用于日志）
+        self._auto_y_enabled = True          # Y 轴跟随当前 X 视窗自动适配
+        self._auto_y_timer = QTimer(self)
+        self._auto_y_timer.setSingleShot(True)
+        self._auto_y_timer.timeout.connect(self._apply_auto_y)
+        self._last_auto_y_x = None
+        self._applying_auto_y = False
 
         self.header = QLabel(self._header_text())
         self.header.setStyleSheet("color:#555; padding:4px 6px;")
@@ -350,10 +395,23 @@ class GraphicWindow(QWidget):
     # ---------------------------------------------------------------- 数据源
     def set_reader(self, reader):
         self._reader = reader
+        self._gps_axis = None
         self._rows.clear()
+        self._single_cursor_value = float("nan")
         self._origin = float(reader.metadata.get("ts_first", 0.0)) if reader else 0.0
         self._color_index = 0
+        if reader is not None and self._time_mode == MODE_GPS:
+            self._ensure_gps_axis()
+            if self._gps_axis is None:
+                logger.warning("新日志没有有效的 0x3A5 RTC，GPS 时间轴回退到原样时间")
+                self._time_mode = "time"
+                self.timeModeChanged.emit(self._time_mode)
+                self.statusMessage.emit("GPS 时间不可用：日志中没有有效的 0x3A5 RTC 帧")
         self._rebuild()
+        if self._single_cursor_enabled and reader is not None:
+            self.reset_single_cursor()
+            self._sync_cursor_lines()
+            self._emit_cursors()
         if reader is not None:
             logger.debug("图形区绑定数据源：%s（%s 帧，时间起点 %.6f）",
                          reader.source_path, reader.frames, self._origin)
@@ -366,12 +424,34 @@ class GraphicWindow(QWidget):
     def time_mode(self) -> str:
         return self._time_mode
 
-    def set_time_mode(self, mode: str):
+    @property
+    def gps_axis(self):
+        return self._gps_axis
+
+    def _ensure_gps_axis(self) -> bool:
+        if self._gps_axis is not None:
+            return True
+        if self._reader is None:
+            return False
+        self._gps_axis = GpsTimeAxis.from_reader(self._reader)
+        if self._gps_axis is None:
+            return False
+        logger.info("启用 GPS 时间轴：%s", self._gps_axis.describe())
+        self.statusMessage.emit("GPS 时间轴：%s" % self._gps_axis.describe())
+        return True
+
+    def set_time_mode(self, mode: str) -> bool:
         if mode == self._time_mode:
-            return
+            return True
+        if mode == MODE_GPS and not self._ensure_gps_axis():
+            self.statusMessage.emit("GPS 时间不可用：日志中没有有效的 0x3A5 RTC 帧")
+            logger.warning("切换 GPS 时间轴失败：没有有效的 0x3A5 RTC 帧")
+            return False
         logger.debug("图形区切换时间轴模式：%s → %s", self._time_mode, mode)
         self._time_mode = mode
+        self.timeModeChanged.emit(mode)
         self._reload_rows()
+        return True
 
     @property
     def overlay(self) -> bool:
@@ -676,6 +756,10 @@ class GraphicWindow(QWidget):
             added += 1
         if added:
             self._rebuild()
+            if self._single_cursor_enabled:
+                self.reset_single_cursor()
+                self._sync_cursor_lines()
+                self._emit_cursors()
             self.statusMessage.emit(
                 "已加入 %d 行（共 %d 行，%s）" % (added, len(self._rows),
                                               MODE_LABELS.get(self._time_mode, "")))
@@ -715,6 +799,7 @@ class GraphicWindow(QWidget):
     def clear(self) -> None:
         logger.debug("清空图形区（原有 %d 行）", len(self._rows))
         self._rows.clear()
+        self._single_cursor_value = float("nan")
         self._rebuild()
 
     def rows(self) -> list:
@@ -730,6 +815,10 @@ class GraphicWindow(QWidget):
         """用给定的行定义重建图形区（加载布局用）。"""
         self.clear()
         if time_mode:
+            if time_mode == MODE_GPS and not self._ensure_gps_axis():
+                self.statusMessage.emit("布局使用 GPS 时间，但当前日志没有有效的 0x3A5 RTC，已回退到原样时间")
+                time_mode = "time"
+                self.timeModeChanged.emit(time_mode)
             self._time_mode = time_mode
         return self.add_specs(list(specs))
 
@@ -739,10 +828,13 @@ class GraphicWindow(QWidget):
         return self._cursors_enabled
 
     def set_cursors_enabled(self, enabled: bool) -> None:
+        if enabled and self._single_cursor_enabled:
+            self._single_cursor_enabled = False
+            self._single_cursor_value = float("nan")
         if enabled == self._cursors_enabled:
             return
         self._cursors_enabled = enabled
-        self.cursor_bar.setVisible(enabled)
+        self.cursor_bar.setVisible(enabled or self._single_cursor_enabled)
         if enabled:
             self.reset_cursors()
         else:
@@ -766,14 +858,57 @@ class GraphicWindow(QWidget):
         self._sync_cursor_lines()
         self._emit_cursors()
 
+    # ------------------------------------------------------------ 单光标
+    @property
+    def single_cursor_enabled(self) -> bool:
+        return self._single_cursor_enabled
+
+    def single_cursor_value(self) -> float:
+        return self._single_cursor_value
+
+    def set_single_cursor_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._single_cursor_enabled:
+            return
+        if enabled:
+            if self._cursors_enabled:
+                self._cursors_enabled = False
+                self._cursor_values = [float("nan"), float("nan")]
+            self._single_cursor_enabled = True
+            self.cursor_bar.setVisible(True)
+            self.reset_single_cursor()
+        else:
+            self._single_cursor_enabled = False
+            self._single_cursor_value = float("nan")
+            self.cursor_bar.setVisible(self._cursors_enabled)
+        logger.debug("单光标 %s（位置=%s）", "开启" if enabled else "关闭",
+                     self._single_cursor_value)
+        self._rebuild()
+        self._emit_cursors()
+
+    def reset_single_cursor(self) -> None:
+        x_range = self.x_range()
+        if x_range is None:
+            self._single_cursor_value = float("nan")
+            return
+        lo, hi = x_range
+        self._single_cursor_value = lo + (hi - lo) / 2.0
+
+    def set_single_cursor_position(self, x: float) -> None:
+        self._single_cursor_value = float(x)
+        self._sync_cursor_lines()
+        self._emit_cursors()
+
     def cursor_positions(self) -> tuple:
+        if self._single_cursor_enabled:
+            return (self._single_cursor_value, float("nan"))
         if not self._cursors_enabled:
             return (float("nan"), float("nan"))
         return (self._cursor_values[0], self._cursor_values[1])
 
     def delta_t(self):
-        """两光标之间的间隔（未启用或未定位时为 None）。"""
-        if not self._cursors_enabled:
+        """两光标之间的间隔（单光标/未启用或未定位时为 None）。"""
+        if self._single_cursor_enabled or not self._cursors_enabled:
             return None
         x1, x2 = self._cursor_values
         if np.isnan(x1) or np.isnan(x2):
@@ -785,11 +920,17 @@ class GraphicWindow(QWidget):
 
         未启用双光标时 T1/T2 为 "—"，但行统计照常给出 —— 值表因此始终有内容。
         """
-        x1, x2 = self._cursor_values
+        if self._single_cursor_enabled:
+            x1, x2 = self._single_cursor_value, float("nan")
+        else:
+            x1, x2 = self._cursor_values
         out = []
         for index, row in enumerate(self._rows):
             v1, t1 = row.value_text_at(x1)
-            v2, t2 = row.value_text_at(x2)
+            if self._single_cursor_enabled:
+                v2, t2 = None, "—"
+            else:
+                v2, t2 = row.value_text_at(x2)
             delta_text = "—"
             if v1 is not None and v2 is not None:
                 diff = v2 - v1
@@ -809,18 +950,19 @@ class GraphicWindow(QWidget):
         self.header.setText(self._header_text())
 
     def _sync_cursor_lines(self) -> None:
-        """把两条光标线同步到当前位置（拖动其中一条时其余镜像线跟随）。"""
+        """把光标线同步到当前位置（双光标时各行的镜像线一起跟随）。"""
         if self._syncing:
             return
         self._syncing = True
         try:
             for _, cursor_index, line in self._cursor_lines:
-                value = self._cursor_values[cursor_index]
+                value = (self._single_cursor_value if self._single_cursor_enabled
+                         else self._cursor_values[cursor_index])
                 if not np.isnan(value):
                     line.setValue(value)
         finally:
             self._syncing = False
-        self.cursor_bar.set_cursor_values(*self._cursor_values)
+        self.cursor_bar.set_cursor_values(*self.cursor_positions())
 
     # -------------------------------------------------- 手柄条联动
     def _on_bar_dragged(self, cursor_index: int, x_value: float) -> None:
@@ -828,11 +970,15 @@ class GraphicWindow(QWidget):
 
         开启吸附时会把位置对齐到采样点，避免"看起来 40、其实 39"的读数错觉。
         """
-        if not self._cursors_enabled:
+        if not (self._cursors_enabled or self._single_cursor_enabled):
             return
         x_lo, x_hi = self._bar_range()
         clamped = float(min(max(x_value, x_lo), x_hi))
-        self._cursor_values[cursor_index] = float(self.snap_x(clamped))
+        value = float(self.snap_x(clamped))
+        if self._single_cursor_enabled:
+            self._single_cursor_value = value
+        else:
+            self._cursor_values[cursor_index] = value
         self._sync_cursor_lines()
         self._emit_cursors()
 
@@ -843,8 +989,10 @@ class GraphicWindow(QWidget):
     def _sync_cursor_bar(self) -> None:
         """同步手柄条的可见性、绘图区比例边界、X 范围与光标位置。"""
         bar = self.cursor_bar
-        bar.set_enabled_state(self._cursors_enabled)
-        if not self._cursors_enabled or not self._rows or self._rows[0].plot is None:
+        enabled = self._cursors_enabled or self._single_cursor_enabled
+        bar.set_enabled_state(enabled)
+        bar.set_single_state(self._single_cursor_enabled)
+        if not enabled or not self._rows or self._rows[0].plot is None:
             return
         viewbox = self._rows[0].plot.getViewBox()
         rect = viewbox.sceneBoundingRect()
@@ -854,7 +1002,7 @@ class GraphicWindow(QWidget):
         right = self.glw.mapFromScene(rect.bottomRight()).x() / float(viewport_width)
         bar.set_plot_ratio(left, right)
         bar.set_x_range(*self._bar_range())
-        bar.set_cursor_values(*self._cursor_values)
+        bar.set_cursor_values(*self.cursor_positions())
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -863,20 +1011,31 @@ class GraphicWindow(QWidget):
     def _on_cursor_dragged(self, cursor_index: int, line) -> None:
         if self._syncing:
             return
-        self._cursor_values[cursor_index] = float(line.value())
+        if self._single_cursor_enabled:
+            self._single_cursor_value = float(line.value())
+        else:
+            self._cursor_values[cursor_index] = float(line.value())
         self._sync_cursor_lines()
         self._emit_cursors()
 
     def _build_cursor_lines(self, row_index: int, plot) -> None:
-        for cursor_index in range(2):
-            value = self._cursor_values[cursor_index]
+        count = 1 if self._single_cursor_enabled else 2
+        for cursor_index in range(count):
+            if self._single_cursor_enabled:
+                value = self._single_cursor_value
+                color = SINGLE_CURSOR_COLOR
+                name = SINGLE_CURSOR_NAME
+            else:
+                value = self._cursor_values[cursor_index]
+                color = CURSOR_COLORS[cursor_index]
+                name = CURSOR_NAMES[cursor_index]
             position = 0.0 if np.isnan(value) else float(value)
             line = pg.InfiniteLine(
                 pos=position,
                 angle=90, movable=True,
-                pen=pg.mkPen(CURSOR_COLORS[cursor_index], width=1.4),
-                label="%s={value:.6f}" % CURSOR_NAMES[cursor_index],
-                labelOpts={"position": 0.08, "color": CURSOR_COLORS[cursor_index],
+                pen=pg.mkPen(color, width=1.4),
+                label="%s={value:.6f}" % name,
+                labelOpts={"position": 0.08, "color": color,
                            "fill": "#ffffffcc", "movable": False})
             line.setZValue(50)
             line.sigPositionChanged.connect(
@@ -893,6 +1052,110 @@ class GraphicWindow(QWidget):
 
     def set_x_range(self, x0: float, x1: float) -> None:
         self._set_x_range(float(x0), float(x1))
+
+    # ------------------------------------------------------------ Y 轴自动适配
+    @property
+    def auto_y_enabled(self) -> bool:
+        return self._auto_y_enabled
+
+    def set_auto_y(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._auto_y_enabled:
+            return
+        self._auto_y_enabled = enabled
+        self._last_auto_y_x = None
+        logger.debug("Y 轴自动适配：%s", "开启" if enabled else "关闭")
+        if enabled:
+            self._schedule_auto_y(force=True)
+
+    def auto_fit_y(self) -> None:
+        """立即按当前 X 视窗适配 Y 轴（测试/按钮用）。"""
+        self._apply_auto_y(force=True)
+
+    def _schedule_auto_y(self, force: bool = False) -> None:
+        if not self._auto_y_enabled:
+            return
+        if force:
+            self._last_auto_y_x = None
+        self._auto_y_timer.start(20)
+
+    def _apply_auto_y(self, force: bool = False) -> None:
+        if not self._auto_y_enabled or self._applying_auto_y:
+            return
+        x_range = self.x_range()
+        if x_range is None:
+            return
+        x0, x1 = x_range
+        if not force and self._last_auto_y_x is not None:
+            last0, last1 = self._last_auto_y_x
+            if abs(x0 - last0) < 1e-9 and abs(x1 - last1) < 1e-9:
+                return
+        self._applying_auto_y = True
+        applied = 0
+        try:
+            if self._overlay:
+                ranges = [self._visible_y_range(row, x0, x1)
+                          for row in self._rows if row.plot is not None]
+                ranges = [item for item in ranges if item is not None]
+                if ranges and self._rows[0].plot is not None:
+                    self._rows[0].plot.setYRange(
+                        min(item[0] for item in ranges),
+                        max(item[1] for item in ranges), padding=0.06)
+                    applied = 1
+            else:
+                for row in self._rows:
+                    if row.plot is None:
+                        continue
+                    visible = self._visible_y_range(row, x0, x1)
+                    if visible is None:
+                        continue
+                    row.plot.setYRange(visible[0], visible[1], padding=0.06)
+                    applied += 1
+            if applied:
+                self._last_auto_y_x = (x0, x1)
+        finally:
+            self._applying_auto_y = False
+        if applied:
+            self._place_overlays()
+            self._place_gps_boundaries()
+            self._update_point_markers()
+            self._sync_cursor_bar()
+            logger.debug("Y 轴自动适配：X %.6f~%.6f → %d 个坐标系",
+                         x0, x1, applied)
+
+    @staticmethod
+    def _visible_y_range(row, x0: float, x1: float):
+        """当前 X 窗口内可见点的 Y 范围；包含左边界前一帧（阶梯信号口径）。"""
+        if row.x is None or row.values is None or len(row.x) == 0:
+            return None
+        x = np.asarray(row.x, dtype=np.float64)
+        y = np.asarray(row.values, dtype=np.float64)
+        if len(x) != len(y):
+            return None
+        finite = np.isfinite(y)
+        if not finite.any():
+            return None
+        if len(x) >= 2 and np.all(x[1:] >= x[:-1]):
+            left = int(np.searchsorted(x, x0, side="right")) - 1
+            right = int(np.searchsorted(x, x1, side="right"))
+            start = max(left, 0)
+            if right <= start:
+                if left < 0:
+                    return None
+                start, right = left, left + 1
+            values = y[start:right][finite[start:right]]
+        else:
+            mask = (x >= x0) & (x <= x1) & finite
+            values = y[mask]
+        if len(values) == 0:
+            return None
+        lo, hi = float(np.min(values)), float(np.max(values))
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            return None
+        if hi - lo < 1e-12:
+            pad = max(1.0, abs(lo) * 0.05) if abs(lo) > 1e-9 else 0.5
+            return lo - pad, hi + pad
+        return lo, hi
 
     # ---------------------------------------------------------------- 内部
     def _index_of(self, spec) -> int:
@@ -911,6 +1174,8 @@ class GraphicWindow(QWidget):
         """按当前时间轴模式生成该行的 X 轴。"""
         if self._time_mode == MODE_INDEX:
             return row.series.seq.astype(np.float64)
+        if self._time_mode == MODE_GPS and self._gps_axis is not None:
+            return self._gps_axis.to_x(row.series.x)
         return row.series.x - self._origin
 
     def _reload_rows(self) -> None:
@@ -928,6 +1193,7 @@ class GraphicWindow(QWidget):
         started = time.time()
         self.glw.clear()
         self._cursor_lines = []
+        self._gps_boundaries = []
         for row in self._rows:               # glw 已清空，旧图元引用全部作废
             row.plot, row.curve, row.caption = None, None, None
             row.readout, row.extreme_lines = None, []
@@ -945,17 +1211,21 @@ class GraphicWindow(QWidget):
             self._set_x_range(float(self._rows[0].x[0]), float(self._rows[0].x[-1]))
         self._connect_range_changes()
         self._place_overlays()
+        self._place_gps_boundaries()
         self._update_readouts()
         self._update_point_markers()
         self._sync_cursor_bar()
         self.header.setText(self._header_text())
+        self._schedule_auto_y(force=True)
         self.rowsChanged.emit()
         points = sum(len(row.values) for row in self._rows if row.values is not None)
-        logger.debug("重建图形：%d 行 / %d 点 | %s | 时间轴 %s | 双光标 %s | 极值标记 %s | 耗时 %.0f ms",
+        cursor_mode = ("single" if self._single_cursor_enabled
+                       else "dual" if self._cursors_enabled else "off")
+        logger.debug("重建图形：%d 行 / %d 点 | %s | 时间轴 %s | 光标 %s | Y 自动 %s | 极值标记 %s | 耗时 %.0f ms",
                      len(self._rows), points,
                      "单坐标轴叠加" if self._overlay else "多轴堆叠",
-                     self._time_mode, self._cursors_enabled, self._show_extremes,
-                     (time.time() - started) * 1000.0)
+                     self._time_mode, cursor_mode, self._auto_y_enabled,
+                     self._show_extremes, (time.time() - started) * 1000.0)
 
     def _prepare_row(self, row) -> bool:
         """把已缓存的序列整理成绘图用的 X / Y（行数据为空时返回 False）。"""
@@ -993,7 +1263,7 @@ class GraphicWindow(QWidget):
             row.caption = self._add_caption(plot, row)
             row.readout = self._add_readout(plot, row)
             self.glw.ci.layout.setRowStretchFactor(index, 1)
-            if self._cursors_enabled:
+            if self._cursors_enabled or self._single_cursor_enabled:
                 self._build_cursor_lines(index, plot)
 
         # 非最后一行隐藏 X 轴刻度，最后一行显示轴名
@@ -1003,7 +1273,11 @@ class GraphicWindow(QWidget):
             if index < len(self._rows) - 1:
                 row.plot.getAxis("bottom").setStyle(showValues=False)
             else:
-                row.plot.setLabel("bottom", MODE_LABELS.get(self._time_mode, ""))
+                if self._time_mode == MODE_GPS and self._gps_axis is not None:
+                    self._install_gps_axis(row.plot)
+                    self._add_gps_boundaries(row.plot)
+                else:
+                    row.plot.setLabel("bottom", MODE_LABELS.get(self._time_mode, ""))
 
         # 共享 X 轴：缩放/平移任一行，其余同步
         for row in self._rows[1:]:
@@ -1025,9 +1299,49 @@ class GraphicWindow(QWidget):
                 row.readout = self._add_readout(plot, row)
                 first = False
         plot.setLabel("left", self._overlay_axis_text())
-        plot.setLabel("bottom", MODE_LABELS.get(self._time_mode, ""))
-        if self._cursors_enabled:
+        if self._time_mode == MODE_GPS and self._gps_axis is not None:
+            self._install_gps_axis(plot)
+            self._add_gps_boundaries(plot)
+        else:
+            plot.setLabel("bottom", MODE_LABELS.get(self._time_mode, ""))
+        if self._cursors_enabled or self._single_cursor_enabled:
             self._build_cursor_lines(0, plot)
+
+    def _install_gps_axis(self, plot) -> None:
+        """把底部轴替换成 RTC 绝对时间刻度。"""
+        plot.setAxisItems({"bottom": GpsAxisItem("bottom", self._gps_axis)})
+        plot.setLabel("bottom", MODE_LABELS.get(MODE_GPS, "GPS 时间"))
+
+    def _add_gps_boundaries(self, plot) -> None:
+        """RTC 时间段切换处画虚线并标注新的绝对时间。"""
+        if self._gps_axis is None or len(self._gps_axis.segments) < 2:
+            return
+        y_top = plot.getViewBox().viewRange()[1][1]
+        for segment in self._gps_axis.segments[1:]:
+            line = pg.InfiniteLine(
+                pos=segment.x_start, angle=90,
+                pen=pg.mkPen("#b06a00", width=1, style=Qt.PenStyle.DashLine))
+            line.setZValue(30)
+            line.setToolTip("RTC 时间跳变 → %s" % segment.abs_start.strftime("%Y-%m-%d %H:%M:%S"))
+            plot.addItem(line, ignoreBounds=True)
+            x_mid = sum(plot.getViewBox().viewRange()[0]) / 2.0
+            anchor = (1, 0) if segment.x_start >= x_mid else (0, 0)
+            text = pg.TextItem(
+                "RTC 跳变 %s" % segment.abs_start.strftime("%H:%M:%S"),
+                color="#9a5b00", anchor=anchor,
+                fill=pg.mkBrush(255, 245, 227, 225))
+            text.setZValue(46)
+            text.setPos(segment.x_start, y_top)
+            plot.addItem(text, ignoreBounds=True)
+            self._gps_boundaries.append((plot, line, text))
+
+    def _place_gps_boundaries(self) -> None:
+        for plot, line, text in self._gps_boundaries:
+            try:
+                (_x0, _x1), (y0, y1) = plot.getViewBox().viewRange()
+            except RuntimeError:
+                continue
+            text.setPos(line.value(), y1 - (y1 - y0) * 0.10)
 
     def _overlay_axis_text(self) -> str:
         """叠加模式的共用 Y 轴标题：单位一致就写出来，否则说明是多信号叠加。"""
@@ -1106,9 +1420,13 @@ class GraphicWindow(QWidget):
             self._range_sources.append(viewbox)
 
     def _on_view_range_changed(self, *_args) -> None:
+        if self._applying_auto_y:
+            return
         self._place_overlays()
+        self._place_gps_boundaries()
         self._update_point_markers()
         self._sync_cursor_bar()
+        self._schedule_auto_y()
 
     def _set_x_range(self, x0: float, x1: float) -> None:
         """所有行共享 X 轴，所以设置第一行即可带动全部。"""
@@ -1121,20 +1439,46 @@ class GraphicWindow(QWidget):
         if not self._rows:
             return "图形区：在左侧树里双击报文（或展开后双击某个字节）即可加入行"
         total_points = sum(len(row.values) for row in self._rows if row.values is not None)
+        mode_text = MODE_LABELS.get(self._time_mode, self._time_mode)
+        if self._time_mode == MODE_GPS and self._gps_axis is not None:
+            mode_text += " · " + self._gps_axis.source
         text = "共 %d 行 / %s 点    %s    X 轴：%s    滚轮缩放 · 拖动平移 · 右键菜单" % (
             len(self._rows), _format_count(total_points),
-            "单坐标轴叠加" if self._overlay else "多轴堆叠",
-            MODE_LABELS.get(self._time_mode, self._time_mode))
+            "单坐标轴叠加" if self._overlay else "多轴堆叠", mode_text)
         if self._readout_x is not None:
-            text += "    | 鼠标 t = %.6f（%s）" % (
-                self._readout_x, "已吸附采样点" if self._snap else "自由位置")
-        if self._cursors_enabled:
+            if self._time_mode == MODE_GPS and self._gps_axis is not None:
+                text += "    | 鼠标时间 = %s（%s）" % (
+                    self._gps_axis.format_full(self._readout_x),
+                    "已吸附采样点" if self._snap else "自由位置")
+            else:
+                text += "    | 鼠标 t = %.6f（%s）" % (
+                    self._readout_x, "已吸附采样点" if self._snap else "自由位置")
+        if self._single_cursor_enabled:
+            value = self._single_cursor_value
+            if np.isnan(value):
+                text += "    | 单光标未定位（拖动绿色光标）"
+            elif self._time_mode == MODE_GPS and self._gps_axis is not None:
+                text += "    | 光标 = %s" % self._gps_axis.format_full(value)
+            else:
+                text += "    | 光标 = %.6f" % value
+        elif self._cursors_enabled:
             delta = self.delta_t()
             if delta is None:
                 text += "    | T1/T2 未定位（拖动红线/蓝线）"
             else:
-                text += "    | ΔT = %.6f s (%.3f ms)" % (delta, delta * 1000.0)
+                if self._time_mode == MODE_GPS and self._gps_axis is not None:
+                    text += "    | T1 %s / T2 %s / ΔT = %.6f s" % (
+                        self._gps_axis.format_full(self._cursor_values[0]),
+                        self._gps_axis.format_full(self._cursor_values[1]), delta)
+                else:
+                    text += "    | ΔT = %.6f s (%.3f ms)" % (delta, delta * 1000.0)
         return text
+
+    def format_time_x(self, x: float) -> str:
+        """导出/状态栏用：GPS 模式输出绝对时间，其余输出秒。"""
+        if self._time_mode == MODE_GPS and self._gps_axis is not None:
+            return self._gps_axis.format_full(x)
+        return "%.6f" % x
 
     # ---------------------------------------------------------------- 右键菜单
     def _on_context_menu(self, pos) -> None:

@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import APP_NAME, TOOL_VERSION  # noqa: E402
 from core.indexer import build_index, default_index_path, index_is_fresh  # noqa: E402
-from core.query import MODE_INDEX, MODE_SESSION, MODE_TIME, IndexReader  # noqa: E402
+from core.query import MODE_GPS, MODE_INDEX, MODE_SESSION, MODE_TIME, IndexReader  # noqa: E402
 from signals.dbc_loader import KINDS, DbcLibrary  # noqa: E402
 from ui.dbc_mapping_dialog import DbcMappingDialog  # noqa: E402
 from ui.graphic_window import GraphicWindow  # noqa: E402
@@ -36,7 +36,8 @@ from utils.log_setup import fmt_bytes, fmt_seconds, setup_logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-TIME_MODES = [("原样时间", MODE_TIME), ("空档压缩", MODE_SESSION), ("全局帧序号", MODE_INDEX)]
+TIME_MODES = [("原样时间", MODE_TIME), ("空档压缩", MODE_SESSION),
+              ("全局帧序号", MODE_INDEX), ("GPS 时间", MODE_GPS)]
 MEASURE_COLUMNS = ["信号", "T1 值", "T2 值", "差值", "最小", "最大", "均值", "极值"]
 EXTREME_COLUMN = len(MEASURE_COLUMNS) - 1        # 最后一列：勾选 = 该行显示 min/max 虚线
 
@@ -150,6 +151,7 @@ class MainWindow(QMainWindow):
         self.tree.removeMessageRequested.connect(self._on_remove_message)
         self.tree.clearRequested.connect(self.graphic.clear)
         self.graphic.statusMessage.connect(self.status_label.setText)
+        self.graphic.timeModeChanged.connect(self._sync_mode_box)
         self.graphic.rowsChanged.connect(self._update_status)
         self.graphic.rowsChanged.connect(self._refresh_measure_table)
         self.graphic.cursorChanged.connect(self._on_cursor_changed)
@@ -193,19 +195,44 @@ class MainWindow(QMainWindow):
         enabled = item.checkState() == Qt.CheckState.Checked
         self.graphic.set_row_extremes(item.row(), enabled)
 
+    def _update_measure_headers(self, single: bool) -> None:
+        header = self.measure_table.horizontalHeaderItem(1)
+        if header is not None:
+            header.setText("光标值" if single else "T1 值")
+        self.measure_table.setColumnHidden(2, single)     # T2 值
+        self.measure_table.setColumnHidden(3, single)     # 差值
+        if single:
+            self.measure_dock.setWindowTitle("测量值表（单光标）")
+        elif self.graphic.cursors_enabled:
+            self.measure_dock.setWindowTitle("测量值表（双光标）")
+        else:
+            self.measure_dock.setWindowTitle("测量值表（行统计）")
+
     def _refresh_measure_table(self) -> None:
         rows = self.graphic.measurements()
+        single = self.graphic.single_cursor_enabled
         self._refreshing_measure = True              # 防：填表触发 itemChanged 再次刷新
         try:
+            self._update_measure_headers(single)
             if not rows:
                 self.measure_table.setRowCount(0)
                 self.delta_label.setText("图形区还没有行：加入报文后这里会显示每行的最小/最大/均值"
-                                         "（启用双光标还会显示 T1/T2 取值与 ΔT）")
+                                         "（启用光标还会显示光标处取值）")
                 return
             stats_note = "行统计 %d 行：最小 / 最大 / 均值；最后一列可单独关掉某行的极值线" % len(rows)
-            if not self.graphic.cursors_enabled:
-                self.delta_label.setText("%s    |    未启用双光标（Ctrl+M 或图形区右键）："
-                                         "启用后可测 T1/T2 与 ΔT" % stats_note)
+            if single:
+                value = self.graphic.single_cursor_value()
+                if value != value:                       # NaN
+                    self.delta_label.setText("%s    |    单光标未定位（拖动绿色光标）"
+                                             % stats_note)
+                else:
+                    text = (self.graphic.format_time_x(value)
+                            if self.graphic.time_mode == MODE_GPS
+                            else "%.6f s" % value)
+                    self.delta_label.setText("光标 = %s    %s" % (text, stats_note))
+            elif not self.graphic.cursors_enabled:
+                self.delta_label.setText("%s    |    未启用光标（Ctrl+M 双光标 / "
+                                         "Ctrl+Shift+M 单光标）：启用后可测当前时刻值" % stats_note)
             else:
                 delta = self.graphic.delta_t()
                 x1, x2 = self.graphic.cursor_positions()
@@ -250,6 +277,19 @@ class MainWindow(QMainWindow):
         self.cursor_action.setCheckable(True)
         self.cursor_action.setShortcut("Ctrl+M")
         self.cursor_action.toggled.connect(self._on_toggle_cursors)
+
+        self.single_cursor_action = QAction("单光标测量", self)
+        self.single_cursor_action.setCheckable(True)
+        self.single_cursor_action.setShortcut("Ctrl+Shift+M")
+        self.single_cursor_action.setToolTip("单条可拖动光标 + 当前值表（Ctrl+Shift+M）")
+        self.single_cursor_action.toggled.connect(self._on_toggle_single_cursor)
+
+        self.auto_y_action = QAction("Y 轴跟随缩放", self)
+        self.auto_y_action.setCheckable(True)
+        self.auto_y_action.setChecked(True)
+        self.auto_y_action.setShortcut("Ctrl+Shift+Y")
+        self.auto_y_action.setToolTip("缩放/平移 X 轴时，按当前可见数据自动适配各行 Y 轴")
+        self.auto_y_action.toggled.connect(self.graphic.set_auto_y)
 
         self.overlay_action = QAction("单坐标轴叠加", self)
         self.overlay_action.setCheckable(True)
@@ -326,7 +366,9 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.mode_box)
         bar.addSeparator()
         bar.addAction(self.cursor_action)
+        bar.addAction(self.single_cursor_action)
         bar.addAction(self.overlay_action)
+        bar.addAction(self.auto_y_action)
         bar.addAction(self.snap_action)
         bar.addAction(self.reset_cursor_action)
         bar.addSeparator()
@@ -354,7 +396,9 @@ class MainWindow(QMainWindow):
 
         menu_view = self.menuBar().addMenu("视图(&V)")
         menu_view.addAction(self.cursor_action)
+        menu_view.addAction(self.single_cursor_action)
         menu_view.addAction(self.overlay_action)
+        menu_view.addAction(self.auto_y_action)
         menu_view.addAction(self.snap_action)
         menu_view.addAction(self.readout_action)
         menu_view.addAction(self.symbols_action)
@@ -440,14 +484,26 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- M4：测量与导出
     def _on_toggle_cursors(self, checked: bool) -> None:
+        if checked and self.single_cursor_action.isChecked():
+            self.single_cursor_action.setChecked(False)
         logger.debug("双光标测量：%s", "开启" if checked else "关闭")
         self.graphic.set_cursors_enabled(bool(checked))
         self._refresh_measure_table()
 
+    def _on_toggle_single_cursor(self, checked: bool) -> None:
+        if checked and self.cursor_action.isChecked():
+            self.cursor_action.setChecked(False)
+        logger.debug("单光标测量：%s", "开启" if checked else "关闭")
+        self.graphic.set_single_cursor_enabled(bool(checked))
+        self._refresh_measure_table()
+
     def _on_reset_cursors(self) -> None:
-        if not self.graphic.cursors_enabled:
-            self.cursor_action.setChecked(True)
-        self.graphic.reset_cursors()
+        if self.graphic.single_cursor_enabled:
+            self.graphic.reset_single_cursor()
+        else:
+            if not self.graphic.cursors_enabled:
+                self.cursor_action.setChecked(True)
+            self.graphic.reset_cursors()
         self.graphic._rebuild()
         logger.debug("重置光标位置：%s", self.graphic.cursor_positions())
         self._refresh_measure_table()
@@ -470,6 +526,8 @@ class MainWindow(QMainWindow):
     def _axis_labels(self) -> tuple:
         if self.graphic.time_mode == MODE_INDEX:
             return ("帧序号", "帧")
+        if self.graphic.time_mode == MODE_GPS:
+            return ("GPS 时间", "")
         return ("时间", "s")
 
     def export_png(self) -> None:
@@ -496,13 +554,22 @@ class MainWindow(QMainWindow):
             return
         t0, t1 = self._export_range()
         x_label, x_unit = self._axis_labels()
+        x_formatter = (self.graphic.format_time_x
+                       if self.graphic.time_mode == MODE_GPS else None)
         try:
-            stats = exporter.export_wide_csv(path, rows, t0, t1, x_label, x_unit)
+            stats = exporter.export_wide_csv(
+                path, rows, t0, t1, x_label, x_unit,
+                x_formatter=x_formatter)
         except ValueError as exc:
             logger.warning("导出 CSV 被护栏拦下：%s", exc)
             QMessageBox.warning(self, "导出范围过大", str(exc))
             return
-        scope = "全部范围" if t0 is None else "光标区间 %.6f~%.6f" % (t0, t1)
+        if self.graphic.time_mode == MODE_GPS:
+            scope = ("GPS 全部范围" if t0 is None
+                     else "GPS %s ~ %s" % (self.graphic.format_time_x(t0),
+                                           self.graphic.format_time_x(t1)))
+        else:
+            scope = "全部范围" if t0 is None else "光标区间 %.6f~%.6f" % (t0, t1)
         logger.info("导出 CSV：%s（%d 行 × %d 列，%s，%.1f KB）", path,
                     stats["rows"], stats["columns"], scope, stats["bytes"] / 1024)
         self.status_label.setText(
@@ -520,9 +587,15 @@ class MainWindow(QMainWindow):
             return
         x_range = self.graphic.x_range()
         cursors = self.graphic.cursor_positions() if self.graphic.cursors_enabled else None
+        single = (self.graphic.single_cursor_value()
+                  if self.graphic.single_cursor_enabled else None)
+        if single is not None and single != single:       # NaN 不写入布局
+            single = None
         exporter.save_layout(path, self.graphic.specs(), self.graphic.time_mode,
                              x_range, cursors,
-                             self._reader.source_path if self._reader else "")
+                             self._reader.source_path if self._reader else "",
+                             single_cursor=single,
+                             auto_y=self.graphic.auto_y_enabled)
         logger.info("保存布局：%s（%d 行，时间轴 %s）", path, self.graphic.row_count(),
                     self.graphic.time_mode)
         self.status_label.setText("已保存布局：%s（%d 行）"
@@ -548,11 +621,19 @@ class MainWindow(QMainWindow):
                 self.mode_box.setCurrentIndex(index)
         self.mode_box.blockSignals(False)
         added = self.graphic.set_specs(layout["rows"], layout["time_mode"])
-        if layout["x_range"]:
-            self.graphic.set_x_range(*layout["x_range"])
-        if layout["cursors"]:
+        if layout.get("auto_y") is not None:
+            self.auto_y_action.setChecked(bool(layout["auto_y"]))
+        if layout.get("single_cursor") is not None:
+            self.single_cursor_action.setChecked(True)
+            self.graphic.set_single_cursor_position(float(layout["single_cursor"]))
+        elif layout["cursors"]:
             self.cursor_action.setChecked(True)
             self.graphic.set_cursor_positions(*layout["cursors"])
+        else:
+            self.cursor_action.setChecked(False)
+            self.single_cursor_action.setChecked(False)
+        if layout["x_range"]:
+            self.graphic.set_x_range(*layout["x_range"])
         self._refresh_measure_table()
         logger.info("加载布局：%s（%d/%d 行加入成功）", path, added, len(layout["rows"]))
         self.status_label.setText("已加载布局：%s（%d/%d 行加入成功）"
@@ -635,7 +716,18 @@ class MainWindow(QMainWindow):
     def _on_mode_changed(self, index: int) -> None:
         mode = self.mode_box.itemData(index)
         logger.debug("切换时间轴模式：%s", mode)
-        self.graphic.set_time_mode(mode)
+        if not self.graphic.set_time_mode(mode):
+            self._sync_mode_box()
+
+    def _sync_mode_box(self, mode: str = None) -> None:
+        """GPS 不可用/布局回退时，把下拉框同步到实际生效的模式。"""
+        mode = mode or self.graphic.time_mode
+        self.mode_box.blockSignals(True)
+        for index in range(self.mode_box.count()):
+            if self.mode_box.itemData(index) == mode:
+                self.mode_box.setCurrentIndex(index)
+                break
+        self.mode_box.blockSignals(False)
 
     def _on_remove_message(self, info) -> None:
         removed = self.graphic.remove_message_rows(info)
@@ -647,11 +739,13 @@ class MainWindow(QMainWindow):
             return
         channels = len(self._reader.channels())
         messages = len(self._reader.catalog())
-        self.status_label.setText(
-            "文件：%s    帧数：%d    通道：%d    报文：%d    图形行数：%d    索引：%s"
-            % (os.path.basename(self._reader.source_path), self._reader.frames,
-               channels, messages, self.graphic.row_count(),
-               self._reader.metadata.get("index_format", "?")))
+        text = ("文件：%s    帧数：%d    通道：%d    报文：%d    图形行数：%d    索引：%s"
+                % (os.path.basename(self._reader.source_path), self._reader.frames,
+                   channels, messages, self.graphic.row_count(),
+                   self._reader.metadata.get("index_format", "?")))
+        if self.graphic.time_mode == MODE_GPS and self.graphic.gps_axis is not None:
+            text += "    |    GPS：%s" % self.graphic.gps_axis.source
+        self.status_label.setText(text)
 
 
 def resolve_asc_path(value: str) -> str:

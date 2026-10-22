@@ -84,22 +84,26 @@ def build_wide_table(rows, t0: float = None, t1: float = None,
 
 def export_wide_csv(path: str, rows, t0: float = None, t1: float = None,
                     x_label: str = "时间", x_unit: str = "s",
-                    max_rows: int = MAX_EXPORT_ROWS) -> dict:
+                    max_rows: int = MAX_EXPORT_ROWS,
+                    x_formatter=None) -> dict:
     """把当前图形行导出为 CSV（双行表头：中文说明 / 英文标识）。
 
+    `x_formatter` 可选（如 GPS 模式把相对秒格式化成绝对时间字符串）。
     Returns:
         {"path", "rows", "columns", "bytes", "t0", "t1"}
     """
     x_union, columns, names = build_wide_table(rows, t0, t1, max_rows)
 
+    x_header = "%s(%s)" % (x_label, x_unit) if x_unit else x_label
+    x_ident = x_label + ("_" + x_unit if x_unit else "")
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["%s(%s)" % (x_label, x_unit)] + names)
-        writer.writerow([x_label + "_" + x_unit] + [row_ident(rows[i]) for i in range(len(rows))])
+        writer.writerow([x_header] + names)
+        writer.writerow([x_ident] + [row_ident(rows[i]) for i in range(len(rows))])
         for position, x in enumerate(x_union):
-            line = ["%.6f" % x]
+            line = [x_formatter(float(x)) if x_formatter else "%.6f" % x]
             for column in columns:
                 value = column[position]
                 line.append(EMPTY if np.isnan(value) else _format_value(value))
@@ -135,7 +139,8 @@ def _format_value(value: float) -> str:
 
 def save_layout(path: str, specs, time_mode: str = "time",
                 x_range: tuple = None, cursors: tuple = None,
-                source: str = "") -> dict:
+                source: str = "", single_cursor: float = None,
+                auto_y: bool = None) -> dict:
     """保存图形布局（行定义 + 时间轴模式 + 视图范围 + 光标）。"""
     payload = {
         "tool": APP_NAME,
@@ -146,6 +151,10 @@ def save_layout(path: str, specs, time_mode: str = "time",
         "cursors": list(cursors) if cursors else None,
         "rows": [spec.to_dict() for spec in specs],
     }
+    if single_cursor is not None:
+        payload["single_cursor"] = float(single_cursor)
+    if auto_y is not None:
+        payload["auto_y"] = bool(auto_y)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -167,5 +176,7 @@ def load_layout(path: str) -> dict:
         "time_mode": payload.get("time_mode", "time"),
         "x_range": tuple(payload["x_range"]) if payload.get("x_range") else None,
         "cursors": tuple(payload["cursors"]) if payload.get("cursors") else None,
+        "single_cursor": payload.get("single_cursor"),
+        "auto_y": payload.get("auto_y"),
         "source": payload.get("source", ""),
     }

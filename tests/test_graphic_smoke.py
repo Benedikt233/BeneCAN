@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.indexer import build_index, default_index_path  # noqa: E402
-from core.query import MODE_INDEX, MODE_TIME, IndexReader  # noqa: E402
+from core.query import MODE_GPS, MODE_INDEX, MODE_TIME, IndexReader  # noqa: E402
 from ui import graphic_window  # noqa: E402
 from ui.msg_tree import ROLE_KIND  # noqa: E402
 
@@ -65,11 +65,18 @@ class TestGraphicSmoke(unittest.TestCase):
         cls.index_path = default_index_path(cls.asc_path)     # 与真实打开流程一致
         build_index(cls.asc_path, index_path=cls.index_path)
         cls.reader = IndexReader.open(cls.index_path)
+        # 隔离开发机上的真实 dbc/channel_map.json：本组测试只验证无 DBC 的字节画像
+        cls.dbc_dir = os.path.join(cls.tmpdir, "dbc")
+        os.makedirs(cls.dbc_dir, exist_ok=True)
+        cls.app_main.DBC_DIR = cls.dbc_dir
 
     @classmethod
     def tearDownClass(cls):
-        for name in os.listdir(cls.tmpdir):
-            os.remove(os.path.join(cls.tmpdir, name))
+        for root, dirs, files in os.walk(cls.tmpdir, topdown=False):
+            for name in files:
+                os.remove(os.path.join(root, name))
+            for name in dirs:
+                os.rmdir(os.path.join(root, name))
         os.rmdir(cls.tmpdir)
 
     def setUp(self):
@@ -79,6 +86,8 @@ class TestGraphicSmoke(unittest.TestCase):
         self.app.processEvents()
         self.graphic = self.window.graphic
         self.tree = self.window.tree
+        # 除专门的 auto-Y 用例外，关掉自动 Y，避免 20 ms 定时器在鼠标/几何测试里移动 Y 范围
+        self.window.auto_y_action.setChecked(False)
 
     def tearDown(self):
         self.window.close()
@@ -158,6 +167,76 @@ class TestGraphicSmoke(unittest.TestCase):
         row = self.graphic.rows()[0]
         self.assertTrue((row.x == row.series.seq.astype(float)).all())
         self.assertTrue(bool((row.x[1:] >= row.x[:-1]).all()))
+
+    def test_gps_mode_without_rtc_falls_back(self):
+        """样本日志没有 0x3A5：切 GPS 要明确失败并保持原模式，不能崩。"""
+        self.graphic.add_message(self.reader.find("canfd", 5, 0x17A))
+        self.assertFalse(self.graphic.set_time_mode(MODE_GPS))
+        self.assertEqual(self.graphic.time_mode, MODE_TIME)
+
+    def _add_counter_row(self):
+        from signals.model import SignalSpec
+
+        spec = SignalSpec(key=("canfd", 5, 0x17A), byte_offset=1, size=1,
+                          dtype="uint8", name="counter")
+        self.graphic.add_specs([spec])
+        return self.graphic.rows()[-1]
+
+    def test_auto_y_fits_visible_x_window(self):
+        row = self._add_counter_row()
+        self.graphic.set_auto_y(True)
+        self.graphic.set_x_range(1.0, 2.0)
+        self.graphic.auto_fit_y()
+        y0, y1 = row.plot.getViewBox().viewRange()[1]
+        mask = (row.x >= 1.0) & (row.x <= 2.0)
+        self.assertTrue(mask.any())
+        self.assertLessEqual(y0, float(row.values[mask].min()))
+        self.assertGreaterEqual(y1, float(row.values[mask].max()))
+
+    def test_auto_y_disabled_keeps_manual_range(self):
+        row = self._add_counter_row()
+        self.graphic.set_auto_y(False)
+        row.plot.setYRange(10.0, 20.0)
+        self.graphic.set_x_range(0.0, 0.5)
+        self.app.processEvents()
+        y0, y1 = row.plot.getViewBox().viewRange()[1]
+        self.assertAlmostEqual(y0, 10.0, delta=0.5)
+        self.assertAlmostEqual(y1, 20.0, delta=0.5)
+
+    def test_auto_y_constant_row_not_degenerate(self):
+        from signals.model import SignalSpec
+
+        spec = SignalSpec(key=("canfd", 5, 0x17A), byte_offset=0, size=1,
+                          dtype="uint8", name="constant")
+        self.graphic.add_specs([spec])
+        row = self.graphic.rows()[-1]
+        self.graphic.set_auto_y(True)
+        self.graphic.auto_fit_y()
+        y0, y1 = row.plot.getViewBox().viewRange()[1]
+        self.assertGreater(y1 - y0, 0.5)
+
+    def test_single_cursor_measurements_and_mode_exclusion(self):
+        row = self._add_counter_row()
+        self.graphic.set_single_cursor_enabled(True)
+        self.assertTrue(self.graphic.single_cursor_enabled)
+        x = float(row.x[10])
+        self.graphic.set_single_cursor_position(x)
+        measurement = self.graphic.measurements()[0]
+        self.assertEqual(measurement["text1"], row.value_text_at(x)[1])
+        self.assertEqual(measurement["text2"], "—")
+        self.assertIsNone(self.graphic.delta_t())
+        self.assertEqual(len(self.graphic._cursor_lines), 1)
+
+        self.graphic.set_cursors_enabled(True)
+        self.assertFalse(self.graphic.single_cursor_enabled)
+        self.assertTrue(self.graphic.cursors_enabled)
+        self.graphic.set_single_cursor_enabled(True)
+        self.assertTrue(self.graphic.single_cursor_enabled)
+        self.assertFalse(self.graphic.cursors_enabled)
+
+        self.graphic.set_single_cursor_enabled(False)
+        self.assertFalse(self.graphic.single_cursor_enabled)
+        self.assertEqual(len(self.graphic._cursor_lines), 0)
 
     def test_rows_share_x_axis(self):
         self.graphic.add_message(self.reader.find("canfd", 5, 0x17A))
@@ -893,6 +972,7 @@ class TestDbcIntegration(unittest.TestCase):
         os.makedirs(cls.dbc_dir)
         with open(os.path.join(cls.dbc_dir, "CH5.dbc"), "w", encoding="utf-8") as fh:
             fh.write(DBC_TEXT)
+        cls.app_main.DBC_DIR = cls.dbc_dir
 
     @classmethod
     def tearDownClass(cls):
@@ -1008,6 +1088,75 @@ class TestDbcIntegration(unittest.TestCase):
         item = self._message_item()
         self.tree._on_expanded(item)
         self.assertIn("不一致", item.child(0).text(0))
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 未安装，跳过 GUI 冒烟测试")
+class TestGpsAxisIntegration(unittest.TestCase):
+    """0x3A5 → GPS 时间轴：真实 ASC/索引 → GraphicWindow → 绝对刻度。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls.tmpdir = tempfile.mkdtemp(prefix="asc_gps_axis_")
+        cls.asc_path = os.path.join(cls.tmpdir, "gps.asc")
+        lines = ["date Mon Jan  1 1:1:1 2999\n",
+                 "base hex  timestamps absolute\n",
+                 "Begin TriggerBlock Mon Jan  1 1:1:1 2999\n"]
+        for index in range(6):
+            payload = [0x0b, 9, 0x96, 13, 59, 7 + index, 0x28, 0]
+            lines.append(canfd_line(1.0 + index, 1, "3A5", payload))
+            lines.append(canfd_line(1.0 + index, 1, "100", [index, 0, 0, 0, 0, 0, 0, 0]))
+        with open(cls.asc_path, "w", encoding="utf-8") as handle:
+            handle.writelines(lines)
+        build_index(cls.asc_path, index_path=default_index_path(cls.asc_path))
+        cls.reader = IndexReader.open(default_index_path(cls.asc_path))
+
+    @classmethod
+    def tearDownClass(cls):
+        for root, dirs, files in os.walk(cls.tmpdir, topdown=False):
+            for name in files:
+                os.remove(os.path.join(root, name))
+            for name in dirs:
+                os.rmdir(os.path.join(root, name))
+        os.rmdir(cls.tmpdir)
+
+    def test_gps_mode_maps_to_absolute_axis(self):
+        from signals.model import SignalSpec
+
+        win = graphic_window.GraphicWindow()
+        win.set_reader(self.reader)
+        spec = SignalSpec(key=("canfd", 1, 0x3A5), byte_offset=5, size=1,
+                          dtype="uint8", name="RTC Second", step=True)
+        win.add_specs([spec])
+        self.assertTrue(win.set_time_mode(MODE_GPS))
+        self.assertEqual(win.time_mode, MODE_GPS)
+        row = win.rows()[0]
+        self.assertAlmostEqual(float(row.x[0]), 0.0, places=6)
+        self.assertAlmostEqual(float(row.x[-1]), 5.0, places=6)
+        self.assertEqual(win.format_time_x(float(row.x[0])),
+                         "2026-09-22 13:59:07")
+        self.assertEqual(win.format_time_x(float(row.x[-1])),
+                         "2026-09-22 13:59:12")
+        axis = row.plot.getAxis("bottom")
+        self.assertIn("GPS", row.plot.getAxis("bottom").labelText)
+        self.assertEqual(axis.tickStrings([0.0, 5.0], None, 1.0),
+                         ["13:59:07", "13:59:12"])
+
+        import csv
+        from utils import export as exporter
+
+        target = os.path.join(self.tmpdir, "gps.csv")
+        exporter.export_wide_csv(
+            target, [row], x_label="GPS 时间", x_unit="",
+            x_formatter=win.format_time_x)
+        with open(target, "r", encoding="utf-8-sig") as handle:
+            exported = list(csv.reader(handle))
+        self.assertEqual(exported[0][0], "GPS 时间")
+        self.assertEqual(exported[2][0], "2026-09-22 13:59:07")
+
+        win.close()
+        win.deleteLater()
+        self.app.processEvents()
 
 
 @unittest.skipUnless(HAS_QT, "PySide6 未安装，跳过 GUI 冒烟测试")

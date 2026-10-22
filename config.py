@@ -9,7 +9,7 @@
 """
 
 APP_NAME = "BeneCAN"
-TOOL_VERSION = "V0.3"
+TOOL_VERSION = "V0.4"
 
 # 通道号 -> (来源 ECU, 上游原始 CHNum)
 CHANNEL_MAP = {

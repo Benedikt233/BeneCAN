@@ -137,11 +137,14 @@ class TestLayout(unittest.TestCase):
 
     def test_save_load_round_trip(self):
         exporter.save_layout(self.path, [self.spec], time_mode="session",
-                             x_range=(1.0, 2.0), cursors=(1.2, 1.8), source="x.asc")
+                             x_range=(1.0, 2.0), cursors=(1.2, 1.8), source="x.asc",
+                             single_cursor=1.5, auto_y=False)
         layout = exporter.load_layout(self.path)
         self.assertEqual(layout["time_mode"], "session")
         self.assertEqual(layout["x_range"], (1.0, 2.0))
         self.assertEqual(layout["cursors"], (1.2, 1.8))
+        self.assertEqual(layout["single_cursor"], 1.5)
+        self.assertIs(layout["auto_y"], False)
         self.assertEqual(len(layout["rows"]), 1)
         restored = layout["rows"][0]
         self.assertEqual(restored.key, self.spec.key)
@@ -168,6 +171,8 @@ class TestLayout(unittest.TestCase):
         self.assertEqual(layout["time_mode"], "time")
         self.assertIsNone(layout["x_range"])
         self.assertIsNone(layout["cursors"])
+        self.assertIsNone(layout["single_cursor"])
+        self.assertIsNone(layout["auto_y"])
 
 
 if __name__ == "__main__":

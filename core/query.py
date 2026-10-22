@@ -12,6 +12,7 @@
     TIME    原样使用 ASC 时间戳（索引内 ts 已按该报文升序，可直接绘图）
     SESSION 把"空档/回退"切成段后拼接，压缩空闲时间（长空档报文更紧凑）
     INDEX   使用帧序号，完全不依赖时间戳
+    GPS     由 0x3A5 RTC 推出的绝对时间（见 signals/gps_time.py；X 仍由 UI 映射）
 
 注意：索引已按 (kind, channel, can_id, ts) 排序，所以单个报文的 ts 天然递增；
 源文件本身乱序的情况由 FrameSeries.file_time_ordered 暴露。
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 MODE_TIME = "time"
 MODE_SESSION = "session"
 MODE_INDEX = "index"
+MODE_GPS = "gps"
 
 # 会话切段阈值：时间戳回退超过该值（秒）或正向空档超过该值，即认为换段
 SESSION_BACKWARD = 1e-6
